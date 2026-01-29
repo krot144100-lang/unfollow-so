@@ -57,6 +57,11 @@ HTML = '''
             LIFETIME UNLIMITED – $9 USDT (TRC20)<br>
             <small>No limits forever · Instant activation</small>
         </a>
+                <div class="timer">★ First 50 buyers – $7 instead of $9 (only 9 spots left!)</div>
+        <a href="https://nowpayments.io/payment?amount=9&currency=usd&payin=usdttrc20&description=Unfollow%20Ninja%20Lifetime%20Unlimited&success_url=https://unfollow-so2.onrender.com" target="_blank" class="pay-big">
+            LIFETIME UNLIMITED – $9 USDT (TRC20)<br>
+            <small>No daily limits · Instant activation · One-time payment</small>
+        </a>
         <p style="text-align:center;font-size:14px;opacity:0.8;margin-top:30px">
             Already used by 3100+ people in 2026<br>
             Made with ❤️ by @krot13 & @krot133
