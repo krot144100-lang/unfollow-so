@@ -51,7 +51,9 @@ HTML = '''
         <div class="log" id="log">Ready.</div>
 
         <div class="timer">★ First 50 buyers only – $7 instead of $9 (11 spots left)</div>
-        <a href="https://nowpayments.io/payment?iid=7583524726&amount=9&currency=usd&extra=payin:usdttrc20&success_url=https://unfollow-so2.onrender.com&description=Unfollow+Ninja+Lifetime" target="_blank" class="pay-big">
+       <a href="https://nowpayments.io/payment?amount=9&currency=usd&payin=usdttrc20&description=Unfollow%20Ninja%20Lifetime%20Unlimited&success_url=https://unfollow-so2.onrender.com" target="_blank" class="pay-big">
+        
+
             LIFETIME UNLIMITED – $9 USDT (TRC20)<br>
             <small>No limits forever · Instant activation</small>
         </a>
