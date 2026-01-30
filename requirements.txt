@@ -1,4 +1,4 @@
-instagrapi==2.1.2
-flask
+Flask>=2.0.0
+instagrapi>=1.16.0
 gunicorn
 Pillow
