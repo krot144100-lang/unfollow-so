@@ -7,29 +7,39 @@ import json
 import time
 import logging
 import re
-import threading
 from functools import wraps
 from datetime import datetime, timedelta
 
-# 🛡️ Security Setup
+# ---------------------------------------------------------
+# 🛡️ CONFIGURATION & SECURITY
+# ---------------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['WTF_CSRF_TIME_LIMIT'] = 3600
+app.config['WTF_CSRF_HEADERS'] = ['X-CSRF-Token'] # Explicitly look for this header
 
-# Configure CSRF to look for the header sent by your JS
 csrf = CSRFProtect(app)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# In-memory storage
+# ⚠️ In-memory storage (Reset on restart). Use Redis for production.
 user_sessions = {}
 
 # ---------------------------------------------------------
-# 1. FIXED: Helper to Manage Device Settings (Prevents Bans)
+# 🔧 HELPER FUNCTIONS
 # ---------------------------------------------------------
+
 def get_instagram_client(session_id):
+    """
+    Reconstructs the Instagrapi Client using saved device settings.
+    CRITICAL: Using saved settings prevents Instagram from seeing
+    a 'New Device' login on every request.
+    """
     if session_id not in user_sessions:
         return None
     
@@ -38,10 +48,11 @@ def get_instagram_client(session_id):
     try:
         cl = Client()
         
-        # ✅ Load saved device settings if they exist to prevent "New Device" flags
+        # ✅ Load specific device settings to prevent bans
         if 'device_settings' in session_data:
             cl.set_settings(session_data['device_settings'])
         
+        # Login using the sessionid cookie
         cl.login_by_sessionid(session_data['sessionid'])
         return cl
     except Exception as e:
@@ -49,13 +60,15 @@ def get_instagram_client(session_id):
         return None
 
 def validate_sessionid(sessionid):
-    # Basic validation
-    if not sessionid or len(sessionid) < 10:
+    if not sessionid or len(sessionid) < 5:
+        return False
+    # Validate it only contains URL-safe characters
+    if not re.match(r'^[A-Za-z0-9%._-]+$', sessionid):
         return False
     return True
 
-# Decorator for session validation
 def require_session(f):
+    """Decorator to ensure user is logged in."""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         session_id = request.headers.get('X-Session-ID')
@@ -65,12 +78,185 @@ def require_session(f):
     return decorated_function
 
 # ---------------------------------------------------------
-# ROUTES
+# 🖥️ FRONTEND TEMPLATE
+# ---------------------------------------------------------
+HTML = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    <title>Unfollow Ninja 2026</title>
+    <style>
+        :root { --bg: #f0f2f5; --card: #ffffff; --text: #1c1e21; --blue: #0095f6; --red: #ed4956; }
+        body.dark { --bg: #121212; --card: #1e1e1e; --text: #e0e0e0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; transition: 0.3s; }
+        .container { max-width: 600px; margin: 0 auto; background: var(--card); padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h1 { text-align: center; margin-bottom: 5px; }
+        textarea { width: 100%; height: 80px; padding: 10px; margin: 10px 0; border: 1px solid #dbdbdb; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        .btn-primary { background: var(--blue); color: white; }
+        .btn-danger { background: var(--red); color: white; }
+        .user-row { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid #dbdbdb; }
+        .log-area { background: #000; color: #0f0; font-family: monospace; padding: 10px; border-radius: 6px; margin-top: 20px; max-height: 150px; overflow-y: auto; font-size: 12px; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Unfollow Ninja</h1>
+    
+    <!-- Login Section -->
+    <div id="login-section">
+        <p>Paste your <code>sessionid</code> cookie below:</p>
+        <textarea id="cookies" placeholder="Warning: Do not share this ID with anyone else."></textarea>
+        <button class="btn-primary" onclick="login()" id="loginBtn">Login</button>
+    </div>
+
+    <!-- Main Section -->
+    <div id="main-section" class="hidden">
+        <h3>Welcome, <span id="username-display"></span></h3>
+        <button class="btn-primary" onclick="scan()" id="scanBtn">Scan Non-Followers</button>
+        <div id="results-area"></div>
+    </div>
+
+    <!-- Logs -->
+    <div class="log-area" id="logs"></div>
+</div>
+
+<script>
+let currentSessionId = '';
+const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+function addLog(msg) {
+    const logs = document.getElementById('logs');
+    logs.innerHTML += `<div>> ${msg}</div>`;
+    logs.scrollTop = logs.scrollHeight;
+}
+
+async function login() {
+    const cookies = document.getElementById('cookies').value.trim();
+    if(!cookies) return alert('Enter sessionid');
+    
+    document.getElementById('loginBtn').disabled = true;
+    addLog('Logging in...');
+
+    try {
+        const res = await fetch('/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+            },
+            body: JSON.stringify({cookies: cookies})
+        });
+        const data = await res.json();
+        
+        if(data.success) {
+            currentSessionId = data.session_id;
+            document.getElementById('username-display').innerText = '@' + data.username;
+            document.getElementById('login-section').classList.add('hidden');
+            document.getElementById('main-section').classList.remove('hidden');
+            addLog('Login successful!');
+        } else {
+            addLog('Error: ' + data.error);
+            document.getElementById('loginBtn').disabled = false;
+        }
+    } catch(e) {
+        addLog('Network Error');
+        document.getElementById('loginBtn').disabled = false;
+    }
+}
+
+async function scan() {
+    addLog('Scanning... This may take a moment.');
+    document.getElementById('scanBtn').disabled = true;
+    
+    try {
+        const res = await fetch('/scan', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+                'X-Session-ID': currentSessionId
+            },
+            body: JSON.stringify({ smart_mode: true })
+        });
+        const data = await res.json();
+        
+        if(data.success) {
+            addLog(`Found ${data.count} non-followers.`);
+            renderList(data.non_followers);
+        } else {
+            addLog('Scan Error: ' + data.error);
+        }
+    } catch(e) {
+        addLog('Error during scan');
+    }
+    document.getElementById('scanBtn').disabled = false;
+}
+
+function renderList(users) {
+    const container = document.getElementById('results-area');
+    container.innerHTML = '';
+    users.forEach(u => {
+        const div = document.createElement('div');
+        div.className = 'user-row';
+        div.innerHTML = `
+            <span><b>${u.username}</b> <small>(${u.follower_count} followers)</small></span>
+            <button class="btn-danger" style="width:auto; padding:5px 15px;" onclick="unfollow('${u.user_id}', this)">Unfollow</button>
+        `;
+        container.appendChild(div);
+    });
+}
+
+async function unfollow(userId, btn) {
+    btn.disabled = true;
+    btn.innerText = '...';
+    
+    try {
+        const res = await fetch('/unfollow', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,
+                'X-Session-ID': currentSessionId
+            },
+            body: JSON.stringify({ user_id: userId })
+        });
+        
+        if(res.status === 429) {
+            addLog('Rate limit hit! Waiting 60s...');
+            btn.innerText = 'Limit';
+            return;
+        }
+
+        const data = await res.json();
+        if(data.success) {
+            addLog('Unfollowed user.');
+            btn.parentElement.remove();
+        } else {
+            addLog('Error: ' + data.error);
+            btn.innerText = 'Retry';
+            btn.disabled = false;
+        }
+    } catch(e) {
+        addLog('Network error');
+        btn.disabled = false;
+    }
+}
+</script>
+</body>
+</html>
+'''
+
+# ---------------------------------------------------------
+# 🛣️ ROUTES
 # ---------------------------------------------------------
 
 @app.route('/')
 def index():
-    # (Assuming HTML variable is defined elsewhere as in your snippet)
     return render_template_string(HTML)
 
 @app.route('/login', methods=['POST'])
@@ -91,17 +277,16 @@ def login():
             cl.login_by_sessionid(sessionid)
             user_info = cl.account_info()
             
-            # ✅ Save device settings immediately
+            # ✅ CRITICAL: Save device settings to reuse later
             device_settings = cl.get_settings()
             
             session_id = os.urandom(16).hex()
             
             user_sessions[session_id] = {
                 'sessionid': sessionid,
-                'device_settings': device_settings, # ✅ Store settings
+                'device_settings': device_settings, # Saved here
                 'user_id': user_info.pk,
                 'username': user_info.username,
-                'following_count': user_info.following_count,
                 'whitelist': [],
                 'non_followers': []
             }
@@ -117,10 +302,11 @@ def login():
         except LoginRequired:
             return jsonify({'success': False, 'error': 'Session expired. Get new sessionid'}), 401
         except Exception as e:
+            logger.error(f"Login failed: {e}")
             return jsonify({'success': False, 'error': f'Login failed: {str(e)}'}), 500
             
     except Exception as e:
-        logger.error(f"Login error: {e}")
+        logger.error(f"System error in login: {e}")
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 @app.route('/scan', methods=['POST'])
@@ -130,9 +316,8 @@ def scan():
         session_id = request.headers.get('X-Session-ID')
         data = request.get_json()
         
-        # Options
-        whitelist = set([u.lower().strip() for u in data.get('whitelist', [])])
         smart_mode = data.get('smart_mode', True)
+        whitelist = set([u.lower().strip() for u in data.get('whitelist', [])])
         
         cl = get_instagram_client(session_id)
         if not cl:
@@ -141,44 +326,40 @@ def scan():
         session_data = user_sessions[session_id]
         user_id = session_data['user_id']
         
-        # ✅ Optimization: Use SET for O(1) lookups
-        # Note: amount=None is dangerous for big accounts. 
-        # Ideally, limit this or use pagination.
+        # ✅ Optimized Scan (Set for O(1) lookup)
         try:
+            # Note: amount=2000 prevents timeouts on free servers. 
+            # For larger accounts, you need background workers (Celery).
             followers_map = {str(f.pk) for f in cl.user_followers_v1(user_id, amount=2000)}
             following_list = cl.user_following_v1(user_id, amount=2000)
         except Exception as e:
-             return jsonify({'success': False, 'error': f'InstaAPI Error: {str(e)}'}), 500
+             return jsonify({'success': False, 'error': f'Instagram API Error: {str(e)}'}), 500
         
         non_followers = []
         
         for user in following_list:
-            # Check whitelist
-            if user.username.lower() in whitelist:
-                continue
+            if user.username.lower() in whitelist: continue
             
-            # ✅ Check if they follow back (Instant Lookup)
-            if str(user.pk) in followers_map:
-                continue
-            
-            # Smart Mode Checks
-            if smart_mode:
-                if user.is_verified: continue
-                if user.follower_count > 10000: continue # Likely a creator/brand
+            # If user PK is NOT in followers set, they don't follow back
+            if str(user.pk) not in followers_map:
                 
-            non_followers.append({
-                'user_id': str(user.pk), # ✅ Send as String to JS to avoid Int overflow
-                'username': user.username,
-                'follower_count': user.follower_count,
-                'is_verified': user.is_verified
-            })
+                # Smart Mode Filters
+                if smart_mode:
+                    if user.is_verified: continue # Don't unfollow celebs
+                    if user.follower_count > 50000: continue # Likely a page
+                
+                non_followers.append({
+                    'user_id': str(user.pk), # String to ensure JS compatibility
+                    'username': user.username,
+                    'follower_count': user.follower_count
+                })
         
-        # Update session
+        # Store in session
         session_data['non_followers'] = non_followers
         
         return jsonify({
             'success': True,
-            'non_followers': non_followers[:100], # Send chunk to UI
+            'non_followers': non_followers[:100], # Send first 100
             'count': len(non_followers)
         })
         
@@ -203,7 +384,7 @@ def unfollow():
         try:
             cl.user_unfollow(user_id_to_unfollow)
             
-            # ✅ 1. REMOVE user from local session list
+            # Update local session data
             session_data = user_sessions[session_id]
             session_data['non_followers'] = [
                 u for u in session_data['non_followers'] 
@@ -213,19 +394,16 @@ def unfollow():
             return jsonify({'success': True})
             
         except ClientError as e:
+            # Handle Instagram Rate Limits (429)
             if e.status_code == 429:
-                # ✅ 2. Handle Rate Limit Gracefully
-                return jsonify({'success': False, 'error': 'Rate limit hit. Waiting...'}), 429
+                return jsonify({'success': False, 'error': 'Rate limit'}), 429
             logger.error(f"Insta Error: {e}")
             return jsonify({'success': False, 'error': 'Instagram API Error'}), 500
         
     except Exception as e:
-        # ✅ 3. FIXED: Removed 'addLog' call
         logger.error(f"Unfollow error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
-# Include your HTML variable here...
-HTML = '''...'''
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
