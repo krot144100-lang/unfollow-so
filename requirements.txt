@@ -1,4 +1,4 @@
 Flask>=2.0.0
 instagrapi>=1.16.0
-gunicorn>=20.1.0
+gunicorn
 Pillow
