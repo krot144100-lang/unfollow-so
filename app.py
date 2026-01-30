@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify, session, abort
+from flask import Flask, render_template_string, request, jsonify, session, abort, make_response
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, ClientError, ClientLoginRequired
 import os
@@ -6,6 +6,9 @@ import json
 import time
 import logging
 import re
+import csv
+import io
+import random
 from functools import wraps
 from datetime import datetime, timedelta
 import threading
@@ -23,7 +26,7 @@ app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=2)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
 
-# In-memory storage for user data (use Redis in production)
+# In-memory storage (Use Redis in production!)
 user_sessions = {}
 unfollow_queue = queue.Queue()
 processing_lock = threading.Lock()
@@ -80,6 +83,7 @@ HTML = '''
         .checkbox input{margin-right:10px}
         .logout{position:fixed;top:15px;left:15px;background:rgba(0,0,0,0.3);color:white;padding:8px 15px;border-radius:20px;cursor:pointer;font-size:14px}
         .logout:hover{background:rgba(0,0,0,0.5)}
+        .export-btn{background:#4caf50;margin-top:15px}
     </style>
 </head>
 <body>
@@ -150,6 +154,10 @@ HTML = '''
             Stop Process
         </button>
         
+        <button onclick="exportToCSV()" class="export-btn" style="display:none" id="exportBtn">
+            Export to CSV
+        </button>
+        
         <div class="log" id="log">
             <div class="log-entry">Ready. Login to start.</div>
         </div>
@@ -218,6 +226,7 @@ async function login() {
             document.getElementById('main').style.display = 'block';
             document.getElementById('logoutBtn').style.display = 'block';
             document.getElementById('stats').innerText = `@${data.username}`;
+            document.getElementById('exportBtn').style.display = 'block';
             
             if (data.is_premium) {
                 document.getElementById('premiumAlert').style.display = 'block';
@@ -226,6 +235,7 @@ async function login() {
             
             addLog(`Logged in as @${data.username}`, 'success');
             updateStats();
+            await loadSavedWhitelist();
         } else {
             addLog(`Login failed: ${data.error}`, 'error');
         }
@@ -245,7 +255,7 @@ async function scan() {
     }
     
     const whitelist = document.getElementById('whitelist').value.split('\n')
-        .map(u => u.trim().toLowerCase())
+        .map(u => u.trim())
         .filter(u => u.length > 0);
     
     const smartMode = document.getElementById('smart').checked;
@@ -258,6 +268,22 @@ async function scan() {
     scanBtn.disabled = true;
     scanBtn.style.display = 'none';
     loader.style.display = 'block';
+    addLog('Saving whitelist...', 'info');
+    
+    // Save whitelist to server
+    try {
+        await fetch('/whitelist/save', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Session-ID': currentSession
+            },
+            body: JSON.stringify({whitelist: whitelist})
+        });
+    } catch (e) {
+        console.log('Failed to save whitelist:', e);
+    }
+    
     addLog('Scanning for non-followers...', 'info');
     
     try {
@@ -271,7 +297,9 @@ async function scan() {
                 whitelist: whitelist,
                 smart_mode: smartMode,
                 skip_verified: skipVerified,
-                skip_recent: skipRecent
+                skip_recent: skipRecent,
+                batch_size: 100,
+                max_users: 2000
             })
         });
         
@@ -279,8 +307,15 @@ async function scan() {
         
         if (data.success) {
             toUnfollow = data.non_followers || [];
+            
+            // Load remaining batches if any
+            if (data.has_more) {
+                addLog(`Found ${data.non_followers_count} non-followers. Loading all...`, 'info');
+                await loadMoreScanResults(data.non_followers_count);
+            }
+            
             updateQueueDisplay();
-            addLog(`Found ${toUnfollow.length} non-followers`, 'success');
+            addLog(`Scan complete! Found ${toUnfollow.length} non-followers`, 'success');
             
             if (toUnfollow.length > 0) {
                 document.getElementById('queue').style.display = 'block';
@@ -301,6 +336,46 @@ async function scan() {
     }
 }
 
+async function loadMoreScanResults(totalCount) {
+    let loaded = toUnfollow.length;
+    
+    while (loaded < totalCount) {
+        try {
+            const response = await fetch('/scan/batch', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-ID': currentSession
+                },
+                body: JSON.stringify({
+                    start: loaded,
+                    batch_size: 100
+                })
+            });
+            
+            const data = await response.json();
+            if (data.success) {
+                toUnfollow = toUnfollow.concat(data.batch);
+                loaded = data.end;
+                
+                if (loaded % 500 === 0 || loaded >= totalCount) {
+                    updateQueueDisplay();
+                    const percent = Math.min(100, Math.round((loaded / totalCount) * 100));
+                    addLog(`Loaded ${loaded}/${totalCount} users (${percent}%)`, 'info');
+                }
+                
+                if (!data.has_more) break;
+            } else {
+                addLog(`Failed to load batch: ${data.error}`, 'error');
+                break;
+            }
+        } catch (error) {
+            addLog(`Error loading batch: ${error.message}`, 'error');
+            break;
+        }
+    }
+}
+
 function updateQueueDisplay() {
     const queueCount = document.getElementById('queueCount');
     const count = document.getElementById('count');
@@ -310,6 +385,12 @@ function updateQueueDisplay() {
     count.textContent = toUnfollow.length;
     
     queueList.innerHTML = '';
+    
+    if (toUnfollow.length === 0) {
+        queueList.innerHTML = '<div style="text-align:center;padding:20px">No non-followers found</div>';
+        return;
+    }
+    
     toUnfollow.slice(0, 20).forEach(user => {
         const div = document.createElement('div');
         div.className = 'user-item';
@@ -328,6 +409,7 @@ function updateQueueDisplay() {
         more.textContent = `... and ${toUnfollow.length - 20} more`;
         more.style.textAlign = 'center';
         more.style.opacity = '0.7';
+        more.style.padding = '10px';
         queueList.appendChild(more);
     }
 }
@@ -392,7 +474,7 @@ async function startUnfollow() {
                 toUnfollow = toUnfollow.filter(u => u.user_id !== user.user_id);
                 updateQueueDisplay();
                 
-                // Add delay to avoid rate limits (3-5 seconds between unfollows)
+                // Add delay to avoid rate limits
                 if (i < toUnfollow.length - 1 && !stopRequested) {
                     addLog('Waiting 4 seconds to avoid detection...', 'info');
                     await new Promise(resolve => setTimeout(resolve, 4000));
@@ -410,9 +492,9 @@ async function startUnfollow() {
     document.getElementById('stopBtn').style.display = 'none';
     
     if (stopRequested) {
-        addLog('Process stopped. ' + completed + ' accounts unfollowed.', 'warning');
+        addLog(`Process stopped. ${completed} accounts unfollowed.`, 'warning');
     } else {
-        addLog(`Process completed! ${completed} accounts unfollowed.`, 'success');
+        addLog(`✅ Process completed! ${completed} accounts unfollowed.`, 'success');
     }
     
     updateStats();
@@ -421,6 +503,45 @@ async function startUnfollow() {
 function stopUnfollow() {
     stopRequested = true;
     addLog('Stopping process after current unfollow...', 'warning');
+}
+
+async function exportToCSV() {
+    if (!currentSession) {
+        addLog('Please login first', 'error');
+        return;
+    }
+    
+    if (toUnfollow.length === 0) {
+        addLog('No data to export. Scan first!', 'warning');
+        return;
+    }
+    
+    addLog('Exporting to CSV...', 'info');
+    
+    try {
+        const response = await fetch('/export/csv', {
+            headers: {'X-Session-ID': currentSession}
+        });
+        
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `non_followers_${new Date().toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            addLog('✅ CSV exported successfully!', 'success');
+        } else {
+            const error = await response.json();
+            addLog(`Export failed: ${error.error}`, 'error');
+        }
+    } catch (error) {
+        addLog(`Export error: ${error.message}`, 'error');
+    }
 }
 
 async function updateStats() {
@@ -443,6 +564,24 @@ async function updateStats() {
         }
     } catch (error) {
         console.error('Failed to update stats:', error);
+    }
+}
+
+async function loadSavedWhitelist() {
+    if (!currentSession) return;
+    
+    try {
+        const response = await fetch('/whitelist/load', {
+            headers: {'X-Session-ID': currentSession}
+        });
+        
+        const data = await response.json();
+        if (data.success && data.whitelist.length > 0) {
+            document.getElementById('whitelist').value = data.whitelist.join('\n');
+            addLog(`Loaded ${data.count} whitelisted users`, 'info');
+        }
+    } catch (error) {
+        console.error('Failed to load whitelist:', error);
     }
 }
 
@@ -476,16 +615,12 @@ function addLog(message, type = 'info') {
 
 // Auto-save whitelist
 document.getElementById('whitelist').addEventListener('input', function() {
-    localStorage.setItem('whitelist', this.value);
+    if (currentSession) {
+        localStorage.setItem('whitelist_' + currentSession, this.value);
+    }
 });
 
-// Load saved whitelist
-const savedWhitelist = localStorage.getItem('whitelist');
-if (savedWhitelist) {
-    document.getElementById('whitelist').value = savedWhitelist;
-}
-
-// Check for session on page load
+// Load saved whitelist from localStorage on page load
 window.addEventListener('load', function() {
     const session = localStorage.getItem('session');
     if (session) {
@@ -500,16 +635,13 @@ window.addEventListener('load', function() {
 
 # Helper functions
 def validate_sessionid(sessionid):
-    """Validate sessionid format"""
     if not sessionid or len(sessionid) < 10:
         return False
-    # Basic validation - sessionid should be alphanumeric with some special chars
     if not re.match(r'^[A-Za-z0-9%\.\-_]+$', sessionid):
         return False
     return True
 
 def get_instagram_client(session_id):
-    """Get or create Instagram client for session"""
     if session_id not in user_sessions:
         return None
     
@@ -545,7 +677,6 @@ def get_instagram_client(session_id):
     return session_data['client']
 
 def cleanup_old_sessions():
-    """Clean up old sessions"""
     current_time = time.time()
     expired = []
     for session_id, data in user_sessions.items():
@@ -568,14 +699,13 @@ def require_session(f):
         if not session_id or session_id not in user_sessions:
             return jsonify({'success': False, 'error': 'Invalid or expired session'}), 401
         
-        # Clean up old sessions periodically
-        if random.random() < 0.1:  # 10% chance on each request
+        if random.random() < 0.1:  # 10% chance
             cleanup_old_sessions()
         
         return f(*args, **kwargs)
     return decorated_function
 
-# Routes
+# ROUTES
 @app.route('/')
 def index():
     return render_template_string(HTML)
@@ -592,26 +722,20 @@ def login():
         if not validate_sessionid(sessionid):
             return jsonify({'success': False, 'error': 'Invalid sessionid format'}), 400
         
-        # Create Instagram client
         cl = Client()
         cl.set_settings({
             "sessionid": sessionid,
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         
-        # Test login by getting user info
         try:
             user_id = cl.user_id_from_username("instagram")
             if not user_id:
                 return jsonify({'success': False, 'error': 'Invalid sessionid'}), 401
             
-            # Get current user info
             user_info = cl.account_info()
-            
-            # Generate session ID
             session_id = os.urandom(16).hex()
             
-            # Store session data
             user_sessions[session_id] = {
                 'sessionid': sessionid,
                 'user_id': user_info.pk,
@@ -619,9 +743,10 @@ def login():
                 'full_name': user_info.full_name,
                 'follower_count': user_info.follower_count,
                 'following_count': user_info.following_count,
-                'is_premium': False,  # Implement premium check
+                'is_premium': False,
                 'last_activity': time.time(),
-                'created_at': datetime.now().isoformat()
+                'created_at': datetime.now().isoformat(),
+                'whitelist': []
             }
             
             logger.info(f"User @{user_info.username} logged in")
@@ -685,78 +810,273 @@ def scan():
         if not data:
             return jsonify({'success': False, 'error': 'No data provided'}), 400
         
-        whitelist = set([u.lower() for u in data.get('whitelist', [])])
+        whitelist = set([u.lower().strip() for u in data.get('whitelist', [])])
         smart_mode = data.get('smart_mode', True)
         skip_verified = data.get('skip_verified', True)
         skip_recent = data.get('skip_recent', True)
+        batch_size = data.get('batch_size', 100)
+        max_users = data.get('max_users', 2000)
         
         cl = get_instagram_client(session_id)
         if not cl:
-            return jsonify({'success': False, 'error': 'Session expired'}), 401
+            return jsonify({'success': False, '0': 'Session expired'}), 401
         
-        # Get user's following
         user_id = user_sessions[session_id]['user_id']
-        following = cl.user_following(user_id, amount=0)  # 0 means get all
+        username = user_sessions[session_id]['username']
         
-        # Get user's followers
+        # Initialize scan
+        user_sessions[session_id]['scan_results'] = {
+            'non_followers': [],
+            'processed': 0,
+            'total_following': 0,
+            'total_followers': 0,
+            'skipped': 0,
+            'whitelisted': 0,
+            'start_time': time.time(),
+            'status': 'scanning'
+        }
+        
+        # Get counts
+        account_info = cl.account_info()
+        total_following = account_info.following_count
+        total_followers = account_info.follower_count
+        
+        user_sessions[session_id]['scan_results'].update({
+            'total_following': total_following,
+            'total_followers': total_followers
+        })
+        
+        logger.info(f"Starting scan for @{username}: {total_following} following")
+        
+        # Get followers
         followers = cl.user_followers(user_id, amount=0)
-        
         follower_ids = set([f.pk for f in followers.values()])
         
+        # Get following
         non_followers = []
-        skipped_count = 0
+        processed = 0
+        skipped = 0
+        whitelisted_count = 0
+        
+        following = cl.user_following(user_id, amount=0)
         
         for user_pk, user in following.items():
+            processed += 1
+            
             # Skip if in whitelist
             if user.username.lower() in whitelist:
-                skipped_count += 1
+                whitelisted_count += 1
                 continue
             
-            # Skip if user follows back
+            # Skip if follows back
             if user_pk in follower_ids:
                 continue
             
-            # Skip verified accounts if enabled
+            # Skip verified
             if skip_verified and user.is_verified:
-                skipped_count += 1
+                skipped += 1
                 continue
             
-            # Skip large accounts if smart mode enabled
+            # Skip large accounts
             if smart_mode and user.follower_count > 12000:
-                skipped_count += 1
+                skipped += 1
                 continue
             
-            # Skip recent follows (last 7 days) if enabled
-            if skip_recent:
-                # Note: This requires storing follow dates, which instagrapi doesn't provide directly
-                # You'd need to implement this differently
-                pass
-            
+            # Add to results
             non_followers.append({
-                'user_id': user_pk,
+                'user_id': str(user_pk),
                 'username': user.username,
-                'full_name': user.full_name,
+                'full_name': user.full_name or '',
                 'is_verified': user.is_verified,
                 'follower_count': user.follower_count,
-                'profile_pic_url': user.profile_pic_url
+                'following_count': user.following_count,
+                'profile_pic_url': user.profile_pic_url,
+                'is_private': user.is_private,
+                'media_count': user.media_count,
+                'scanned_at': datetime.now().isoformat()
             })
+            
+            # Safety limit
+            if len(non_followers) >= max_users:
+                break
+            
+            # Small delay every 100 users
+            if processed % 100 == 0:
+                time.sleep(0.5)
         
-        # Store results in session
+        # Update session
+        user_sessions[session_id]['scan_results'].update({
+            'non_followers': non_followers,
+            'processed': processed,
+            'skipped': skipped,
+            'whitelisted': whitelisted_count,
+            'status': 'completed',
+            'completed_at': time.time(),
+            'duration': time.time() - user_sessions[session_id]['scan_results']['start_time']
+        })
+        
         user_sessions[session_id]['non_followers'] = non_followers
         
-        logger.info(f"Scan completed for @{user_sessions[session_id]['username']}: {len(non_followers)} non-followers found")
+        logger.info(f"Scan completed for @{username}: {len(non_followers)} non-followers")
         
         return jsonify({
             'success': True,
-            'non_followers': non_followers,
-            'total_following': len(following),
-            'total_followers': len(followers),
-            'skipped': skipped_count
+            'non_followers': non_followers[:100],
+            'total_following': total_following,
+            'total_followers': total_followers,
+            'non_followers_count': len(non_followers),
+            'processed': processed,
+            'skipped': skipped,
+            'whitelisted': whitelisted_count,
+            'has_more': len(non_followers) > 100,
+            'scan_id': f"scan_{int(time.time())}_{username}"
         })
         
     except Exception as e:
         logger.error(f"Scan error: {e}")
         return jsonify({'success': False, 'error': f'Scan failed: {str(e)}'}), 500
+
+@app.route('/scan/batch', methods=['POST'])
+@require_session
+def scan_batch():
+    try:
+        session_id = request.headers.get('X-Session-ID')
+        data = request.get_json()
+        
+        start_idx = data.get('start', 0)
+        batch_size = data.get('batch_size', 100)
+        
+        if 'scan_results' not in user_sessions[session_id]:
+            return jsonify({'success': False, 'error': 'No scan results'}), 400
+        
+        non_followers = user_sessions[session_id]['scan_results']['non_followers']
+        end_idx = min(start_idx + batch_size, len(non_followers))
+        
+        return jsonify({
+            'success': True,
+            'batch': non_followers[start_idx:end_idx],
+            'start': start_idx,
+            'end': end_idx,
+            'total': len(non_followers),
+            'has_more': end_idx < len(non_followers)
+        })
+        
+    except Exception as e:
+        logger.error(f"Batch error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/scan/status', methods=['GET'])
+@require_session
+def scan_status():
+    try:
+        session_id = request.headers.get('X-Session-ID')
+        
+        if 'scan_results' not in user_sessions[session_id]:
+            return jsonify({'success': False, 'error': 'No scan in progress'}), 400
+        
+        results = user_sessions[session_id]['scan_results']
+        
+        return jsonify({
+            'success': True,
+            'status': results['status'],
+            'processed': results['processed'],
+            'total_following': results['total_following'],
+            'non_followers_count': len(results['non_followers']),
+            'progress_percentage': min(100, int((results['processed'] / max(1, results['total_following'])) * 100))
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/export/csv', methods=['GET'])
+@require_session
+def export_csv():
+    try:
+        session_id = request.headers.get('X-Session-ID')
+        
+        if 'scan_results' not in user_sessions[session_id]:
+            return jsonify({'success': False, 'error': 'No scan results'}), 400
+        
+        non_followers = user_sessions[session_id]['scan_results']['non_followers']
+        
+        if not non_followers:
+            return jsonify({'success': False, 'error': 'No data to export'}), 400
+        
+        # Create CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        writer.writerow([
+            'Username', 'Full Name', 'User ID', 'Verified', 
+            'Followers', 'Following', 'Posts', 'Private',
+            'Scanned At'
+        ])
+        
+        for user in non_followers:
+            writer.writerow([
+                user['username'],
+                user['full_name'],
+                user['user_id'],
+                'Yes' if user['is_verified'] else 'No',
+                user['follower_count'],
+                user['following_count'],
+                user.get('media_count', 0),
+                'Yes' if user.get('is_private', False) else 'No',
+                user['scanned_at']
+            ])
+        
+        output.seek(0)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        username = user_sessions[session_id]['username']
+        filename = f"non_followers_{username}_{timestamp}.csv"
+        
+        response = make_response(output.getvalue())
+        response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+        response.headers['Content-type'] = 'text/csv'
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        return jsonify({'success': False, 'error': f'Export failed: {str(e)}'}), 500
+
+@app.route('/whitelist/save', methods=['POST'])
+@require_session
+def save_whitelist():
+    try:
+        session_id = request.headers.get('X-Session-ID')
+        data = request.get_json()
+        
+        if not data or 'whitelist' not in data:
+            return jsonify({'success': False, 'error': 'No whitelist'}), 400
+        
+        whitelist = [u.strip() for u in data['whitelist'] if u.strip()]
+        user_sessions[session_id]['whitelist'] = whitelist
+        
+        return jsonify({
+            'success': True,
+            'message': f'Whitelist saved ({len(whitelist)} users)',
+            'count': len(whitelist)
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/whitelist/load', methods=['GET'])
+@require_session
+def load_whitelist():
+    try:
+        session_id = request.headers.get('X-Session-ID')
+        whitelist = user_sessions[session_id].get('whitelist', [])
+        
+        return jsonify({
+            'success': True,
+            'whitelist': whitelist,
+            'count': len(whitelist)
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/unfollow', methods=['POST'])
 @require_session
@@ -774,68 +1094,46 @@ def unfollow():
         if not cl:
             return jsonify({'success': False, 'error': 'Session expired'}), 401
         
-        # Check if user is in non_followers list
         session_data = user_sessions[session_id]
-        if 'non_followers' not in session_data:
-            return jsonify({'success': False, 'error': 'No scan data available'}), 400
         
         # Find user in non_followers
         user_to_unfollow = None
-        for user in session_data['non_followers']:
+        for user in session_data.get('non_followers', []):
             if user['user_id'] == user_id_to_unfollow:
                 user_to_unfollow = user
                 break
         
         if not user_to_unfollow:
-            return jsonify({'success': False, 'error': 'User not found in non-followers list'}), 404
+            return jsonify({'success': False, 'error': 'User not found'}), 404
         
-        # Perform unfollow
-        try:
-            result = cl.user_unfollow(user_id_to_unfollow)
+        # Unfollow
+        result = cl.user_unfollow(user_id_to_unfollow)
+        
+        if result:
+            # Update counts
+            session_data['following_count'] -= 1
             
-            if result:
-                # Remove from local list
-                session_data['non_followers'] = [
-                    u for u in session_data['non_followers'] 
-                    if u['user_id'] != user_id_to_unfollow
-                ]
-                
-                # Update following count
-                session_data['following_count'] -= 1
-                
-                logger.info(f"Unfollowed @{user_to_unfollow['username']} for @{session_data['username']}")
-                
-                return jsonify({
-                    'success': True,
-                    'message': f'Unfollowed @{user_to_unfollow["username"]}',
-                    'remaining': len(session_data['non_followers'])
-                })
-            else:
-                return jsonify({'success': False, 'error': 'Unfollow failed'}), 500
-                
-        except Exception as e:
-            logger.error(f"Unfollow API error: {e}")
-            return jsonify({'success': False, 'error': f'Instagram API error: {str(e)}'}), 500
+            # Remove from list
+            session_data['non_followers'] = [
+                u for u in session_data['non_followers'] 
+                if u['user_id'] != user_id_to_unfollow
+            ]
+            
+            logger.info(f"Unfollowed @{user_to_unfollow['username']} for @{session_data['username']}")
+            
+            return jsonify({
+                'success': True,
+                'message': f'Unfollowed @{user_to_unfollow["username"]}',
+                'remaining': len(session_data['non_followers'])
+            })
+        else:
+            return jsonify({'success': False, 'error': 'Unfollow failed'}), 500
             
     except Exception as e:
         logger.error(f"Unfollow error: {e}")
         return jsonify({'success': False, 'error': f'Unfollow failed: {str(e)}'}), 500
 
-@app.route('/status', methods=['GET'])
-@require_session
-def status():
-    session_id = request.headers.get('X-Session-ID')
-    session_data = user_sessions.get(session_id, {})
-    
-    return jsonify({
-        'success': True,
-        'is_active': True,
-        'username': session_data.get('username'),
-        'non_followers_count': len(session_data.get('non_followers', [])),
-        'is_premium': session_data.get('is_premium', False),
-        'last_activity': session_data.get('last_activity')
-    })
-
+# Error handlers
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'success': False, 'error': 'Not found'}), 404
@@ -843,4 +1141,8 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"Internal server error: {error}")
-    return jsonify({'
+    return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
