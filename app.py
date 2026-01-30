@@ -12,7 +12,7 @@ import time
 # 🛡️ CONFIGURATION & SECURITY
 # ---------------------------------------------------------
 app = Flask(__name__)
-# Generate a random secret key for session security
+# Security Key
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['WTF_CSRF_TIME_LIMIT'] = 3600
 app.config['WTF_CSRF_HEADERS'] = ['X-CSRF-Token'] 
@@ -23,7 +23,7 @@ csrf = CSRFProtect(app)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ⚠️ In-memory storage. (Note: Data resets if you restart the server)
+# ⚠️ In-memory storage (Resets on server restart)
 user_sessions = {}
 
 # ---------------------------------------------------------
@@ -31,10 +31,7 @@ user_sessions = {}
 # ---------------------------------------------------------
 
 def get_instagram_client(session_id):
-    """
-    Reconstructs the client using SAVED device settings.
-    This is critical to prevent Instagram 'New Device' checkpoints.
-    """
+    """Reconstructs the client using SAVED device settings to prevent bans."""
     if session_id not in user_sessions:
         return None
     
@@ -42,7 +39,7 @@ def get_instagram_client(session_id):
     
     try:
         cl = Client()
-        # ✅ Load the specific device settings we saved during login
+        # ✅ Load specific device settings
         if 'device_settings' in session_data:
             cl.set_settings(session_data['device_settings'])
         
@@ -96,9 +93,9 @@ HTML = '''
         /* List Styling */
         .user-row { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid #dbdbdb; }
         .log-area { background: #1a1a1a; color: #00ff9d; font-family: monospace; padding: 15px; border-radius: 6px; margin-top: 20px; max-height: 200px; overflow-y: auto; font-size: 13px; }
-        .hidden { display: none; }
+        .hidden { display: none !important; }
 
-        /* 🔥 YOUR CUSTOM CSS (The Pay Button) */
+        /* 🔥 THE PAY BUTTON */
         .pay-big {
             background: linear-gradient(135deg, #ff0080, #ff4081);
             color: white;
@@ -112,8 +109,16 @@ HTML = '''
             text-align: center;
             box-shadow: 0 10px 25px rgba(255, 0, 128, 0.4);
             transition: transform 0.2s;
+            cursor: pointer;
         }
         .pay-big:hover { transform: scale(1.02); }
+
+        /* 💰 PAYMENT MODAL STYLES */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        .modal-box { background: white; padding: 30px; border-radius: 15px; width: 90%; max-width: 400px; position: relative; animation: slideUp 0.3s; }
+        .close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: #999; }
+        .crypto-box { background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-radius: 8px; margin-top: 10px; word-break: break-all; font-family: monospace; font-size: 14px; }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     </style>
 </head>
 <body>
@@ -141,7 +146,7 @@ HTML = '''
         <div id="results-area"></div>
         
         <!-- The Upsell Button -->
-        <a href="#" class="pay-big" onclick="alert('Demo Mode: Premium features coming soon!')">
+        <a class="pay-big" onclick="openPaymentModal()">
             🚀 UNLOCK PREMIUM
         </a>
     </div>
@@ -152,11 +157,52 @@ HTML = '''
     </div>
 </div>
 
+<!-- 💰 PAYMENT MODAL POPUP -->
+<div id="paymentModal" class="modal-overlay hidden">
+    <div class="modal-box">
+        <span class="close-btn" onclick="closePaymentModal()">&times;</span>
+        <h2 style="margin-top:0">🚀 Upgrade to Premium</h2>
+        <p>Unlock unlimited scans and auto-unfollow bot.</p>
+        
+        <div style="margin-top:20px;">
+            <strong>Option 1: Crypto (USDT/BTC)</strong>
+            <div class="crypto-box">
+                <!-- 👇 EDIT THIS ADDRESS 👇 -->
+                0x123456789ABCDEF_YOUR_WALLET_ADDRESS
+            </div>
+            <p style="font-size:12px; color:#666;">Copy address above and send $10.</p>
+        </div>
+
+        <div style="margin-top:20px;">
+            <strong>Option 2: PayPal</strong>
+            <a href="https://paypal.me/" target="_blank" class="btn-primary" style="display:block; text-align:center; text-decoration:none; margin-top:5px;">
+                Pay with PayPal
+            </a>
+        </div>
+
+        <div style="text-align:center; margin-top:20px; font-size:12px; color:#888;">
+            After payment, please email support@example.com
+        </div>
+    </div>
+</div>
+
 <script>
 let currentSessionId = '';
-// Get CSRF Token from meta tag
 const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
 
+// --- PAYMENT MODAL FUNCTIONS ---
+function openPaymentModal() {
+    document.getElementById('paymentModal').classList.remove('hidden');
+}
+function closePaymentModal() {
+    document.getElementById('paymentModal').classList.add('hidden');
+}
+// Close if clicking outside the box
+document.getElementById('paymentModal').addEventListener('click', function(e) {
+    if (e.target === this) closePaymentModal();
+});
+
+// --- LOGIC FUNCTIONS ---
 function addLog(msg) {
     const logs = document.getElementById('logs');
     const time = new Date().toLocaleTimeString();
@@ -308,13 +354,12 @@ def login():
         if not validate_sessionid(sessionid):
             return jsonify({'success': False, 'error': 'Invalid sessionid format'}), 400
         
-        # Initialize client
         cl = Client()
         try:
             cl.login_by_sessionid(sessionid)
             user_info = cl.account_info()
             
-            # ✅ SAVE DEVICE SETTINGS (Crucial for anti-ban)
+            # ✅ SAVE DEVICE SETTINGS
             device_settings = cl.get_settings()
             
             session_id = os.urandom(16).hex()
@@ -360,7 +405,7 @@ def scan():
         user_id = session_data['user_id']
         
         try:
-            # Fetch data (limited to 2000 for speed/safety)
+            # Note: Limiting to 2000 for standard web server timeout safety
             followers_set = {str(f.pk) for f in cl.user_followers_v1(user_id, amount=2000)}
             following_list = cl.user_following_v1(user_id, amount=2000)
         except Exception as e:
@@ -369,10 +414,7 @@ def scan():
         non_followers = []
         
         for user in following_list:
-            # If user ID is NOT in followers_set, they don't follow back
             if str(user.pk) not in followers_set:
-                
-                # Smart Mode: Skip verified & huge accounts
                 if smart_mode:
                     if user.is_verified: continue 
                     if user.follower_count > 50000: continue 
@@ -387,7 +429,7 @@ def scan():
         
         return jsonify({
             'success': True,
-            'non_followers': non_followers[:100], # Send chunk
+            'non_followers': non_followers[:100],
             'count': len(non_followers)
         })
         
@@ -407,11 +449,8 @@ def unfollow():
         
         try:
             cl.user_unfollow(user_id)
-            
-            # Remove from local list
             session_data = user_sessions[session_id]
             session_data['non_followers'] = [u for u in session_data['non_followers'] if str(u['user_id']) != str(user_id)]
-            
             return jsonify({'success': True})
             
         except ClientError as e:
