@@ -12,7 +12,7 @@ import time
 # 🛡️ CONFIGURATION & SECURITY
 # ---------------------------------------------------------
 app = Flask(__name__)
-# Security Key
+# Generate a random secret key for session security
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24).hex())
 app.config['WTF_CSRF_TIME_LIMIT'] = 3600
 app.config['WTF_CSRF_HEADERS'] = ['X-CSRF-Token'] 
@@ -52,6 +52,7 @@ def get_instagram_client(session_id):
 def validate_sessionid(sessionid):
     if not sessionid or len(sessionid) < 5:
         return False
+    # Validate URL safe chars
     if not re.match(r'^[A-Za-z0-9%._-]+$', sessionid):
         return False
     return True
@@ -77,12 +78,13 @@ HTML = '''
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Unfollow Ninja 2026</title>
     <style>
-        :root { --bg: #f0f2f5; --card: #ffffff; --text: #1c1e21; --blue: #0095f6; --red: #ed4956; }
+        :root { --bg: #f0f2f5; --card: #ffffff; --text: #1c1e21; --blue: #0095f6; --red: #ed4956; --green: #00a400; }
         body { font-family: -apple-system, system-ui, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; }
         
         .container { max-width: 600px; margin: 0 auto; background: var(--card); padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #333; }
-        
+        h1 { text-align: center; color: #333; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #666; font-size: 14px; margin-bottom: 25px; }
+
         /* Inputs & Buttons */
         textarea { width: 100%; height: 80px; padding: 10px; margin: 10px 0; border: 1px solid #dbdbdb; border-radius: 6px; box-sizing: border-box; font-family: monospace; }
         button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 16px; }
@@ -99,36 +101,55 @@ HTML = '''
         .pay-big {
             background: linear-gradient(135deg, #ff0080, #ff4081);
             color: white;
-            padding: 28px 32px;
-            border-radius: 20px;
+            padding: 24px 32px;
+            border-radius: 16px;
             text-decoration: none;
             display: block;
-            margin: 50px auto 30px;
+            margin: 40px auto 20px;
             font-weight: bold;
-            font-size: 22px;
+            font-size: 20px;
             text-align: center;
-            box-shadow: 0 10px 25px rgba(255, 0, 128, 0.4);
+            box-shadow: 0 10px 25px rgba(255, 0, 128, 0.3);
             transition: transform 0.2s;
             cursor: pointer;
+            border: 2px solid rgba(255,255,255,0.2);
         }
-        .pay-big:hover { transform: scale(1.02); }
+        .pay-big:hover { transform: scale(1.02); box-shadow: 0 15px 35px rgba(255, 0, 128, 0.5); }
 
         /* 💰 PAYMENT MODAL STYLES */
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1000; display: flex; justify-content: center; align-items: center; }
-        .modal-box { background: white; padding: 30px; border-radius: 15px; width: 90%; max-width: 400px; position: relative; animation: slideUp 0.3s; }
-        .close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: #999; }
-        .crypto-box { background: #f8f9fa; padding: 15px; border: 1px solid #ddd; border-radius: 8px; margin-top: 10px; word-break: break-all; font-family: monospace; font-size: 14px; }
-        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1000; display: flex; justify-content: center; align-items: center; backdrop-filter: blur(5px); }
+        .modal-box { background: white; padding: 30px; border-radius: 16px; width: 90%; max-width: 420px; position: relative; animation: slideUp 0.3s; box-shadow: 0 20px 50px rgba(0,0,0,0.3); }
+        .close-btn { position: absolute; top: 15px; right: 20px; font-size: 28px; cursor: pointer; color: #999; line-height: 1; }
+        .close-btn:hover { color: #333; }
+        
+        .crypto-box { 
+            background: #f1f2f6; 
+            padding: 15px; 
+            border: 1px dashed #ccc; 
+            border-radius: 8px; 
+            margin-top: 10px; 
+            word-break: break-all; 
+            font-family: monospace; 
+            font-size: 13px; 
+            text-align: center;
+            cursor: pointer;
+            position: relative;
+        }
+        .crypto-box:active { background: #e1e2e6; transform: scale(0.98); }
+        .copy-hint { font-size: 10px; color: #888; margin-top: 5px; display: block; text-align: center; }
+
+        @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     </style>
 </head>
 <body>
 
 <div class="container">
     <h1>🥷 Unfollow Ninja</h1>
+    <div class="subtitle">Safely clean your Instagram account</div>
 
     <!-- Login Screen -->
     <div id="login-section">
-        <div style="background:#eef; padding:10px; border-radius:8px; margin-bottom:15px; font-size:14px;">
+        <div style="background:#eef; padding:12px; border-radius:8px; margin-bottom:15px; font-size:14px; border-left: 4px solid var(--blue);">
             <strong>Safe Login:</strong> Paste your <code>sessionid</code> cookie below. We never ask for passwords.
         </div>
         <textarea id="cookies" placeholder="Paste sessionid here..."></textarea>
@@ -147,7 +168,8 @@ HTML = '''
         
         <!-- The Upsell Button -->
         <a class="pay-big" onclick="openPaymentModal()">
-            🚀 UNLOCK PREMIUM
+            ⚡ UNLOCK PREMIUM FEATURES
+            <div style="font-size:14px; font-weight:normal; margin-top:5px; opacity:0.9">Auto-Unfollow Bot & Unlimited Scans</div>
         </a>
     </div>
 
@@ -161,27 +183,23 @@ HTML = '''
 <div id="paymentModal" class="modal-overlay hidden">
     <div class="modal-box">
         <span class="close-btn" onclick="closePaymentModal()">&times;</span>
-        <h2 style="margin-top:0">🚀 Upgrade to Premium</h2>
-        <p>Unlock unlimited scans and auto-unfollow bot.</p>
+        <h2 style="margin-top:0; text-align:center;">🚀 Go Premium</h2>
+        <p style="text-align:center; color:#666; margin-bottom:20px;">Get the Auto-Unfollow Bot, Whitelist Manager, and Unlimited Daily Scans.</p>
         
-        <div style="margin-top:20px;">
-            <strong>Option 1: Crypto (USDT/BTC)</strong>
-            <div class="crypto-box">
-                <!-- 👇 EDIT THIS ADDRESS 👇 -->
-                0x123456789ABCDEF_YOUR_WALLET_ADDRESS
+        <div style="margin-bottom:25px;">
+            <strong>Payment Method: USDT (TRC20)</strong>
+            <div style="font-size:12px; color:#666; margin-bottom:5px;">Send <b>$10 USDT</b> to the address below:</div>
+            
+            <!-- 👇 YOUR WALLET ADDRESS IS HERE 👇 -->
+            <div class="crypto-box" onclick="copyToClipboard('TXzgMGjDHUt52QNTcXSP67qB4AmuB1H1KB')">
+                TXzgMGjDHUt52QNTcXSP67qB4AmuB1H1KB
             </div>
-            <p style="font-size:12px; color:#666;">Copy address above and send $10.</p>
+            <span class="copy-hint">(Click box to copy address)</span>
         </div>
 
-        <div style="margin-top:20px;">
-            <strong>Option 2: PayPal</strong>
-            <a href="https://paypal.me/" target="_blank" class="btn-primary" style="display:block; text-align:center; text-decoration:none; margin-top:5px;">
-                Pay with PayPal
-            </a>
-        </div>
-
-        <div style="text-align:center; margin-top:20px; font-size:12px; color:#888;">
-            After payment, please email support@example.com
+        <div style="text-align:center; padding-top:15px; border-top:1px solid #eee;">
+            <p style="font-size:13px; color:#555;">After payment, click below to verify:</p>
+            <button class="btn-primary" onclick="alert('Thank you! Please email support with your transaction hash to activate.')">I have sent payment</button>
         </div>
     </div>
 </div>
@@ -197,7 +215,14 @@ function openPaymentModal() {
 function closePaymentModal() {
     document.getElementById('paymentModal').classList.add('hidden');
 }
-// Close if clicking outside the box
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        alert("✅ Address Copied: " + text);
+    }).catch(err => {
+        console.error('Failed to copy: ', err);
+    });
+}
+// Close if clicking outside
 document.getElementById('paymentModal').addEventListener('click', function(e) {
     if (e.target === this) closePaymentModal();
 });
@@ -231,7 +256,7 @@ async function login() {
             document.getElementById('username-display').innerText = '@' + data.username;
             document.getElementById('login-section').classList.add('hidden');
             document.getElementById('main-section').classList.remove('hidden');
-            addLog('Login successful! Device settings saved.');
+            addLog('Login successful!');
         } else {
             addLog('❌ Error: ' + data.error);
             btn.innerText = 'Login securely';
@@ -244,7 +269,7 @@ async function login() {
 }
 
 async function scan() {
-    addLog('Scanning followers... (This takes 10-20 seconds)');
+    addLog('Scanning... (Please wait 10-20s)');
     const btn = document.getElementById('scanBtn');
     btn.disabled = true;
     
@@ -261,7 +286,7 @@ async function scan() {
         const data = await res.json();
         
         if(data.success) {
-            addLog(`✅ Analysis complete. Found ${data.count} people who don't follow back.`);
+            addLog(`✅ Scan Complete. Found ${data.count} non-followers.`);
             renderList(data.non_followers);
         } else {
             addLog('❌ Scan failed: ' + data.error);
@@ -312,7 +337,7 @@ async function unfollow(userId, btn) {
         
         if(res.status === 429) {
             addLog('⚠️ Rate limited. Waiting 60s...');
-            btn.innerText = 'Wait';
+            btn.innerText = 'Limit';
             return;
         }
 
@@ -405,7 +430,7 @@ def scan():
         user_id = session_data['user_id']
         
         try:
-            # Note: Limiting to 2000 for standard web server timeout safety
+            # 2000 limit for speed
             followers_set = {str(f.pk) for f in cl.user_followers_v1(user_id, amount=2000)}
             following_list = cl.user_following_v1(user_id, amount=2000)
         except Exception as e:
