@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: unfollow-ninja
+    runtime: python
+    plan: free
+    autoDeploy: true
+
+    buildCommand: |
+      pip install -r requirements.txt
+
+    startCommand: |
+      gunicorn app:app
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # DB
+      - key: DB_PATH
+        value: "data/app.db"
+
+      # Credits/Plans
+      - key: FREE_CREDITS
+        value: "100"
+      - key: STARTER_PACK_CREDITS
+        value: "1000"
+
+      # Security
+      - key: SECRET_KEY
+        generateValue: true
+
+      # Admin approvals (set your own secret in Render UI after first deploy)
+      - key: ADMIN_GRANT_KEY
+        sync: false
+
+      # Payment address TRC20 (set in Render UI)
+      - key: PAYMENT_ADDRESS_TRC20
+        sync: false
