@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 🛡️ CONFIGURATION & SECURITY
+# CONFIGURATION
 # ---------------------------------------------------------
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(24).hex())
@@ -21,11 +21,11 @@ csrf = CSRFProtect(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Runtime in-memory session store (resets on restart)
+# In-memory sessions (will reset on restart and won't work across multiple instances)
 user_sessions = {}
 
 # ---------------------------------------------------------
-# 💾 DB (SQLite)
+# DB (SQLite)
 # ---------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", os.path.join("data", "app.db"))
 FREE_CREDITS = int(os.environ.get("FREE_CREDITS", 100))
@@ -117,14 +117,14 @@ def upsert_user_on_login(session_id: str, ig_user_id: str, ig_username: str):
             INSERT INTO users(session_id, ig_user_id, ig_username, plan, credits, created_at, updated_at)
             VALUES(?,?,?,?,?,?,?)
         """, (session_id, str(ig_user_id), ig_username, "free", FREE_CREDITS, ts, ts))
-        logger.info(f"DB: created user @{ig_username} with {FREE_CREDITS} free credits")
+        logger.info("DB: created user @%s with %s free credits", ig_username, FREE_CREDITS)
     else:
         cur.execute("""
             UPDATE users
             SET ig_user_id=?, ig_username=?, updated_at=?
             WHERE session_id=?
         """, (str(ig_user_id), ig_username, ts, session_id))
-        logger.info(f"DB: updated user @{ig_username}")
+        logger.info("DB: updated user @%s", ig_username)
 
     conn.commit()
     conn.close()
@@ -157,7 +157,7 @@ def spend_credit(session_id: str, target_id: str, delta: int):
 
 
 # ---------------------------------------------------------
-# 🔧 HELPERS
+# HELPERS
 # ---------------------------------------------------------
 def get_instagram_client(session_id):
     if session_id not in user_sessions:
@@ -168,16 +168,17 @@ def get_instagram_client(session_id):
         if "device_settings" in session_data:
             cl.set_settings(session_data["device_settings"])
         cl.login_by_sessionid(session_data["sessionid"])
-        cl.account_info()  # validate session
+        cl.account_info()
         return cl
     except Exception as e:
-        logger.error(f"Client creation failed: {e}")
+        logger.error("Client creation failed: %s", e)
         return None
 
 
 def validate_sessionid(sessionid: str) -> bool:
     if not sessionid or len(sessionid) < 5:
         return False
+    # only value, no ';' etc
     if not re.match(r"^[A-Za-z0-9%._-]+$", sessionid):
         return False
     return True
@@ -186,16 +187,16 @@ def validate_sessionid(sessionid: str) -> bool:
 def extract_sessionid(cookie_str: str) -> str:
     """
     Accepts either:
-    - pure sessionid value (e.g. 123%3Aabc%3A...)
-    - full cookie header string (e.g. '...; sessionid=...; ...')
+    - pure sessionid value
+    - full Cookie string
     Returns sessionid value or "".
     """
     if not cookie_str:
         return ""
-    # If it already looks like a pure value and doesn't contain ';', keep as-is.
-    if "sessionid=" not in cookie_str and ";" not in cookie_str:
-        return cookie_str.strip()
-    m = re.search(r"(?:^|;\s*)sessionid=([^;]+)", cookie_str)
+    s = cookie_str.strip()
+    if "sessionid=" not in s and ";" not in s:
+        return s
+    m = re.search(r"(?:^|;\s*)sessionid=([^;]+)", s)
     return m.group(1).strip() if m else ""
 
 
@@ -221,7 +222,22 @@ def require_session(f):
 
 
 # ---------------------------------------------------------
-# 🖥️ DARK UI
+# ERROR HANDLERS (so we see JSON errors on Render)
+# ---------------------------------------------------------
+@app.errorhandler(500)
+def handle_500(e):
+    logger.exception("Unhandled 500")
+    return jsonify({"success": False, "error": "internal_error"}), 500
+
+
+@app.errorhandler(Exception)
+def handle_any_exception(e):
+    logger.exception("Unhandled exception")
+    return jsonify({"success": False, "error": type(e).__name__, "detail": str(e)}), 500
+
+
+# ---------------------------------------------------------
+# UI
 # ---------------------------------------------------------
 HTML = r"""
 <!DOCTYPE html>
@@ -239,83 +255,15 @@ h1{margin:0 0 6px;font-size:32px;letter-spacing:-1px;background:linear-gradient(
 .subtitle{color:var(--muted);margin-bottom:18px;font-size:14px;line-height:1.4}
 .badge{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:10px 0 12px}
 .pill{background:#0b0b0b;border:1px solid #262626;color:#bdbdbd;font-size:12px;padding:7px 10px;border-radius:999px}
-
 input, textarea{width:100%;padding:16px;margin-bottom:12px;background:#1a1a1a;border:1px solid #333;border-radius:12px;color:#fff;font-size:15px;outline:none;box-sizing:border-box;transition:.2s}
 textarea{min-height:78px;resize:vertical;font-family:ui-monospace,Menlo,monospace}
-input:focus, textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(255,0,128,.2)}
-
 button.action-btn{width:100%;padding:16px;background:#fff;color:#000;border:none;border-radius:12px;font-size:15px;font-weight:900;cursor:pointer;transition:.2s;text-transform:uppercase;letter-spacing:1px}
-button.action-btn:hover{transform:scale(1.01);background:#f0f0f0}
 button.action-btn:disabled{opacity:.55;cursor:wait;transform:none}
-button.secondary{background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.12);text-transform:none;letter-spacing:0;font-weight:800}
-button.secondary:hover{background:rgba(255,255,255,.10)}
-
 hr{border:0;border-top:1px solid #1f1f1f;margin:16px 0}
-.row{display:flex;gap:10px}
-.row > *{flex:1}
-
-#results{margin-top:14px;text-align:left}
-.user-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 12px;border-radius:14px;border:1px solid #222;background:#0b0b0b;margin-top:10px}
-.user-meta{min-width:0}
-.user-meta strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.user-meta .sub{font-size:12px;color:#9aa0aa;margin-top:2px}
-.btn-danger{background:rgba(255,0,128,.14);border:1px solid rgba(255,0,128,.35);color:#fff;padding:10px 12px;border-radius:12px;font-weight:900;cursor:pointer;transition:.2s}
-.btn-danger:hover{background:rgba(255,0,128,.22)}
-.btn-danger:disabled{opacity:.6;cursor:wait}
-
 .small{font-size:12px;color:#9aa0aa;line-height:1.4;margin-top:10px}
 .log{margin-top:14px;background:#0b0b0b;border:1px solid #222;border-radius:16px;padding:12px;text-align:left;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#bfe3c6;max-height:180px;overflow:auto}
-
-.pay-big{background:linear-gradient(135deg,#ff0080,#ff4081);color:#fff;padding:18px 16px;border-radius:18px;text-decoration:none;display:block;margin:22px auto 8px;font-weight:900;font-size:18px;box-shadow:0 10px 30px rgba(255,0,128,.3);transition:transform .2s;cursor:pointer;border:1px solid rgba(255,255,255,.1)}
-.pay-big:hover{transform:scale(1.01);box-shadow:0 15px 40px rgba(255,0,128,.45)}
-.pay-sub{font-size:12px;opacity:.85;font-weight:normal;margin-top:6px;display:block}
-
-/* MODAL */
-.modal-overlay{
-  position:fixed; top:0; left:0;
-  width:100%; height:100%;
-  background:rgba(0,0,0,.8);
-  backdrop-filter:blur(5px);
-  z-index:999;
-  display:flex;
-  justify-content:center;
-  align-items:center;
-  opacity:0;
-  visibility:hidden;
-  transition:.25s;
-  pointer-events:none;
-}
-.modal-overlay.active{
-  opacity:1;
-  visibility:visible;
-  pointer-events:auto;
-}
-.modal-box{background:#141414;padding:22px;border-radius:22px;width:92%;max-width:420px;position:relative;border:1px solid #333;text-align:left;transform:translateY(16px);transition:.25s}
-.modal-overlay.active .modal-box{transform:translateY(0)}
-.close-btn{position:absolute;top:12px;right:16px;font-size:28px;cursor:pointer;color:#666}
-.close-btn:hover{color:#fff}
-.crypto-box{background:#000;padding:12px;border:1px dashed #444;border-radius:12px;margin-top:10px;font-family:ui-monospace,Menlo,monospace;font-size:13px;color:#bbb;word-break:break-all;text-align:center;transition:.2s; flex: 1}
-.crypto-box:hover{border-color:#ff0080;color:#fff;background:#0a0a0a}
-.toast{margin-top:10px;color:#bfe3c6;font-size:12px}
-.hidden{display:none !important;}
-.warn{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,93,93,.35);background:rgba(255,93,93,.08);color:#ffd2d2;font-size:12px;line-height:1.35}
-
-.copy-btn{
-  width:auto;
-  padding:12px 12px;
-  border-radius:12px;
-  border:1px solid rgba(255,255,255,.12);
-  background:rgba(255,255,255,.08);
-  color:#fff;
-  font-weight:900;
-  cursor:pointer;
-  transition:.2s;
-  white-space:nowrap;
-}
-.copy-btn:hover{background:rgba(255,255,255,.10)}
 </style>
 </head>
-
 <body>
 <div class="container">
   <h1>Unfollow Ninja</h1>
@@ -327,116 +275,24 @@ hr{border:0;border-top:1px solid #1f1f1f;margin:16px 0}
   </div>
 
   <div id="loginBox">
-    <textarea id="sessionid" placeholder="Paste Instagram sessionid cookie here..."></textarea>
+    <textarea id="sessionid" placeholder="Paste Instagram sessionid (value) OR full Cookie string here..."></textarea>
     <button onclick="login()" id="loginBtn" class="action-btn">LOGIN</button>
-    <div class="small">
-      We never ask for passwords. You get <b>100</b> free unfollows per account. Then upgrade.
-    </div>
+    <div class="small">We never ask for passwords. You get <b>100</b> free unfollows per account.</div>
     <hr>
-  </div>
-
-  <div id="appBox" class="hidden">
-    <div class="row" style="margin-bottom:10px">
-      <button class="action-btn secondary" onclick="scan()" id="scanBtn">Scan non-followers</button>
-      <button class="action-btn secondary" onclick="logoutLocal()" id="logoutBtn">Sign out</button>
-    </div>
-
-    <div class="small" id="scanInfo"></div>
-    <div id="results"></div>
-
-    <a class="pay-big" onclick="openModal()">
-      💳 GET PAID PLAN
-      <span class="pay-sub">Pay USDT (TRC20) • Submit TXID • Manual activation</span>
-    </a>
   </div>
 
   <div class="log" id="logs"><div>> System ready.</div></div>
 </div>
 
-<div id="paymentModal" class="modal-overlay">
-  <div class="modal-box">
-    <span class="close-btn" onclick="closeModal()">&times;</span>
-
-    <h2 style="margin:0 0 6px 0;color:#fff">Activate plan</h2>
-    <div style="color:#9aa0aa;font-size:13px;line-height:1.5">
-      Send USDT on <b>TRC20</b>, then paste your TXID. Activation is manual.
-    </div>
-
-    <div class="warn"><b>TRC20 only.</b> Sending from other networks may result in loss.</div>
-
-    <div style="margin-top:12px;color:#fff;font-weight:900">Send to address:</div>
-
-    <div class="row" style="align-items:stretch; margin-top:10px">
-      <div class="crypto-box" id="addrBox">{{ pay_addr if pay_addr else "SET PAYMENT_ADDRESS_TRC20 in env" }}</div>
-      <button class="copy-btn" onclick="copyAddress()">Copy</button>
-    </div>
-
-    <div style="margin-top:14px;display:flex;gap:10px">
-      <button class="action-btn secondary" style="padding:12px;font-size:13px" onclick="selectPlan('starter')">$5 Starter</button>
-      <button class="action-btn secondary" style="padding:12px;font-size:13px" onclick="selectPlan('lifetime')">$9 Lifetime</button>
-    </div>
-
-    <div class="small" id="planHint" style="margin-top:8px">
-      Selected: STARTER — expected amount: <b>5 USDT</b> (TRC20)
-    </div>
-
-    <input id="txid" placeholder="Paste TXID here..." style="margin-top:12px" />
-
-    <div class="row" style="margin-top:10px">
-      <button class="action-btn secondary" style="padding:12px;font-size:13px" onclick="openTronScan()">
-        OPEN TRONSCAN
-      </button>
-      <button class="action-btn" style="padding:12px;font-size:13px" onclick="submitTxid()">
-        SUBMIT TXID
-      </button>
-    </div>
-
-    <div id="payStatus" class="toast"></div>
-
-    <div class="small" style="margin-top:10px; text-align:left;">
-      <div style="font-weight:900;color:#fff;margin-bottom:6px;">How to find TXID</div>
-      <div style="opacity:.9; line-height:1.5;">
-        • <b>Trust Wallet:</b> USDT (TRC20) → History → open transfer → copy <b>TxID / Hash</b>.<br>
-        • <b>Bybit:</b> Assets → History → select transfer → copy <b>TxID</b>.<br>
-        • Make sure it’s <b>USDT on TRC20</b> and recipient matches the address above.
-      </div>
-    </div>
-
-    <div class="small" style="margin-top:10px">
-      Check your request status:
-      <button class="secondary"
-        style="padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.08);color:#fff;cursor:pointer"
-        onclick="loadMyRequests()">Refresh status</button>
-    </div>
-
-    <div id="myReq" class="small" style="margin-top:8px"></div>
-  </div>
-</div>
-
 <script>
 let currentSessionId = '';
-let selectedPlan = "starter";
 const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
-const modal = document.getElementById("paymentModal");
-const addr = `{{ pay_addr if pay_addr else "" }}`;
 
-function setPill(id, text){ const el = document.getElementById(id); if(el) el.textContent = text; }
 function addLog(msg){
   const logs = document.getElementById('logs');
   const time = new Date().toLocaleTimeString();
   logs.innerHTML += `<div><span style="opacity:0.6">[${time}]</span> ${msg}</div>`;
   logs.scrollTop = logs.scrollHeight;
-}
-
-async function refreshMe(){
-  if(!currentSessionId) return;
-  try{
-    const res = await fetch('/api/me', { headers: { 'X-Session-ID': currentSessionId }});
-    const data = await res.json();
-    if(data.ok){
-      setPill('quotaState', `Plan: ${data.plan} • Credits: ${data.credits}`);
-    }
-  }catch(e){}
 }
 
 async function login(){
@@ -448,26 +304,32 @@ async function login(){
   btn.textContent = 'VERIFYING...';
 
   try{
+    const payload = { cookies: s };
+    addLog("Sending /login JSON payload keys: " + Object.keys(payload).join(", "));
+
     const res = await fetch('/login', {
       method: 'POST',
-      headers: { 'Content-Type':'application/json', 'X-CSRF-Token': csrfToken },
-      body: JSON.stringify({ cookies: s })
+      headers: {
+        'Content-Type':'application/json',
+        'X-CSRF-Token': csrfToken
+      },
+      body: JSON.stringify(payload)
     });
-    const data = await res.json().catch(() => ({}));
+
+    const text = await res.text();
+    let data = {};
+    try { data = JSON.parse(text); } catch(e){
+      addLog("Server returned non-JSON: " + text.slice(0,120));
+      return;
+    }
 
     if(!data.success){
-      addLog('Login failed: ' + (data.error || ('HTTP ' + res.status)));
+      addLog('Login failed: ' + (data.error || ('HTTP ' + res.status)) + (data.hint ? (" | " + data.hint) : ""));
       return;
     }
 
     currentSessionId = data.session_id;
-    setPill('authState', 'Signed in: @' + data.username);
-
-    document.getElementById('loginBox').classList.add('hidden');
-    document.getElementById('appBox').classList.remove('hidden');
-
-    addLog('Login OK: @' + data.username);
-    await refreshMe();
+    addLog('Login OK: @' + data.username + " session=" + currentSessionId.slice(0,8) + "…");
   }catch(e){
     addLog('Network error during login');
   } finally {
@@ -481,7 +343,7 @@ async function login(){
 """
 
 # ---------------------------------------------------------
-# 🛣️ ROUTES
+# ROUTES
 # ---------------------------------------------------------
 @app.route("/")
 def index():
@@ -495,15 +357,33 @@ def index():
 @app.route("/login", methods=["POST"])
 @csrf.exempt
 def login():
-    data = request.get_json(silent=True) or {}
-    raw = (data.get("cookies") or "").strip()
-    sessionid = extract_sessionid(raw)
-
-    if not validate_sessionid(sessionid):
-        return jsonify({"success": False, "error": "Invalid sessionid format (paste only sessionid or full Cookie string)"}), 400
-
-    cl = Client()
     try:
+        logger.info("=== /login hit ===")
+        logger.info("Content-Type: %s", request.headers.get("Content-Type"))
+        logger.info("Content-Length: %s", request.headers.get("Content-Length"))
+
+        raw_body = request.get_data(as_text=True) or ""
+        logger.info("Raw body first 200 chars: %r", raw_body[:200])
+
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({
+                "success": False,
+                "error": "no_json_body",
+                "hint": "Expected JSON with Content-Type application/json"
+            }), 400
+
+        raw = (data.get("cookies") or "").strip()
+        sessionid = extract_sessionid(raw)
+
+        if not validate_sessionid(sessionid):
+            return jsonify({
+                "success": False,
+                "error": "invalid_sessionid_format",
+                "hint": "Paste only sessionid value OR full Cookie string containing sessionid=..."
+            }), 400
+
+        cl = Client()
         cl.login_by_sessionid(sessionid)
         user_info = cl.account_info()
 
@@ -520,11 +400,11 @@ def login():
 
         upsert_user_on_login(session_id, user_info.pk, user_info.username)
 
-        logger.info(f"Login OK: @{user_info.username}")
+        logger.info("Login OK: @%s", user_info.username)
         return jsonify({"success": True, "session_id": session_id, "username": user_info.username})
 
     except LoginRequired:
-        return jsonify({"success": False, "error": "Session expired. Get a fresh cookie."}), 401
+        return jsonify({"success": False, "error": "session_expired"}), 401
     except ClientError as e:
         logger.exception("Instagram ClientError during login")
         return jsonify({"success": False, "error": f"ClientError: {e}"}), 400
@@ -533,288 +413,10 @@ def login():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route("/api/me", methods=["GET"])
-@require_session
-def api_me():
-    session_id = request.headers.get("X-Session-ID")
-    u = get_user_by_session(session_id)
-    if not u:
-        return jsonify({"ok": False, "error": "no_user"}), 404
-    return jsonify({
-        "ok": True,
-        "plan": u["plan"],
-        "credits": int(u["credits"]),
-        "ig_username": u["ig_username"]
-    })
-
-
-@app.route("/api/payment/submit-txid", methods=["POST"])
-@require_session
-@csrf.exempt
-def submit_txid():
-    session_id = request.headers.get("X-Session-ID")
-    data = request.get_json(silent=True) or {}
-    plan = (data.get("plan") or "").strip()
-    txid = (data.get("txid") or "").strip()
-
-    if plan not in ("starter", "lifetime"):
-        return jsonify({"ok": False, "error": "invalid_plan"}), 400
-    if not validate_txid(txid):
-        return jsonify({"ok": False, "error": "invalid_txid"}), 400
-
-    conn = db()
-    cur = conn.cursor()
-    ts = now_iso()
-
-    cur.execute("SELECT id, status FROM payment_requests WHERE txid=? ORDER BY id DESC LIMIT 1", (txid,))
-    existing = cur.fetchone()
-    if existing:
-        conn.close()
-        return jsonify({"ok": False, "error": "txid_already_submitted"}), 409
-
-    cur.execute("""
-        INSERT INTO payment_requests(session_id, plan, txid, status, created_at, updated_at)
-        VALUES(?,?,?,?,?,?)
-    """, (session_id, plan, txid, "pending", ts, ts))
-    conn.commit()
-    conn.close()
-
-    logger.info(f"Payment request submitted: plan={plan}, txid={txid}, session={session_id}")
-    return jsonify({"ok": True, "status": "pending"})
-
-
-@app.route("/api/payment/my-requests", methods=["GET"])
-@require_session
-def my_payment_requests():
-    session_id = request.headers.get("X-Session-ID")
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, plan, txid, status, created_at, updated_at
-        FROM payment_requests
-        WHERE session_id=?
-        ORDER BY id DESC
-        LIMIT 10
-    """, (session_id,))
-    rows = [dict(r) for r in cur.fetchall()]
-    conn.close()
-    return jsonify({"ok": True, "items": rows})
-
-
-@app.route("/scan", methods=["POST"])
-@require_session
-@csrf.exempt
-def scan():
-    session_id = request.headers.get("X-Session-ID")
-    data = request.get_json(silent=True) or {}
-    smart_mode = data.get("smart_mode", True)
-
-    cl = get_instagram_client(session_id)
-    if not cl:
-        return jsonify({"success": False, "error": "Session expired"}), 401
-
-    session_data = user_sessions[session_id]
-    user_id = session_data["user_id"]
-
-    try:
-        followers = cl.user_followers_v1(user_id, amount=2000)
-        following = cl.user_following_v1(user_id, amount=2000)
-
-        followers_iter = followers.values() if isinstance(followers, dict) else followers
-        following_iter = following.values() if isinstance(following, dict) else following
-
-        followers_set = {str(u.pk) for u in followers_iter}
-        following_list = list(following_iter)
-    except Exception as e:
-        logger.exception("Instagram API error during scan")
-        return jsonify({"success": False, "error": f"Instagram API Error: {str(e)}"}), 500
-
-    non_followers = []
-    for user in following_list:
-        if str(user.pk) not in followers_set:
-            if smart_mode:
-                if getattr(user, "is_verified", False):
-                    continue
-                if getattr(user, "follower_count", 0) > 50000:
-                    continue
-
-            non_followers.append({
-                "user_id": str(user.pk),
-                "username": user.username,
-                "follower_count": getattr(user, "follower_count", 0)
-            })
-
-    session_data["non_followers"] = non_followers
-
-    return jsonify({
-        "success": True,
-        "non_followers": non_followers[:100],
-        "count": len(non_followers)
-    })
-
-
-@app.route("/unfollow", methods=["POST"])
-@require_session
-@csrf.exempt
-def unfollow():
-    session_id = request.headers.get("X-Session-ID")
-    data = request.get_json(silent=True) or {}
-
-    raw_user_id = data.get("user_id")
-    try:
-        user_id = int(raw_user_id)
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "invalid_user_id"}), 400
-
-    u = get_user_by_session(session_id)
-    allowed, reason = can_unfollow(u)
-    if not allowed:
-        return jsonify({
-            "success": False,
-            "error": "Payment required",
-            "code": reason,
-            "plan": (u["plan"] if u else None),
-            "credits": (int(u["credits"]) if u else 0)
-        }), 402
-
-    cl = get_instagram_client(session_id)
-    if not cl:
-        return jsonify({"success": False, "error": "Session expired"}), 401
-
-    try:
-        cl.user_unfollow(user_id)
-
-        if u and u["plan"] != "lifetime":
-            spend_credit(session_id, target_id=str(user_id), delta=-1)
-
-        session_data = user_sessions[session_id]
-        session_data["non_followers"] = [
-            x for x in session_data.get("non_followers", [])
-            if str(x.get("user_id")) != str(user_id)
-        ]
-
-        updated = get_user_by_session(session_id)
-        return jsonify({"success": True, "plan": updated["plan"], "credits": int(updated["credits"])})
-
-    except ClientError as e:
-        if getattr(e, "status_code", None) == 429:
-            return jsonify({"success": False, "error": "Rate limit hit"}), 429
-        logger.exception("ClientError during unfollow")
-        return jsonify({"success": False, "error": f"API Error: {e}"}), 500
-    except Exception as e:
-        logger.exception("Unexpected error during unfollow")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
-# Admin: approve request by TXID after manual verification on tronscan
-@app.route("/api/admin/approve-txid", methods=["POST"])
-@csrf.exempt
-def admin_approve_txid():
-    if not ADMIN_GRANT_KEY:
-        return jsonify({"ok": False, "error": "admin_disabled"}), 403
-    if request.headers.get("X-Admin-Key") != ADMIN_GRANT_KEY:
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-
-    data = request.get_json(silent=True) or {}
-    txid = (data.get("txid") or "").strip()
-
-    if not validate_txid(txid):
-        return jsonify({"ok": False, "error": "invalid_txid"}), 400
-
-    conn = db()
-    cur = conn.cursor()
-    ts = now_iso()
-
-    cur.execute("SELECT * FROM payment_requests WHERE txid=? ORDER BY id DESC LIMIT 1", (txid,))
-    req = cur.fetchone()
-    if not req:
-        conn.close()
-        return jsonify({"ok": False, "error": "txid_not_found"}), 404
-    if req["status"] == "approved":
-        conn.close()
-        return jsonify({"ok": True, "already": True}), 200
-
-    session_id = req["session_id"]
-    plan = req["plan"]
-
-    # Apply benefits
-    if plan == "starter":
-        cur.execute("""
-            UPDATE users
-            SET credits = credits + ?, updated_at=?
-            WHERE session_id=? AND plan != 'lifetime'
-        """, (STARTER_PACK_CREDITS, ts, session_id))
-    elif plan == "lifetime":
-        cur.execute("UPDATE users SET plan='lifetime', updated_at=? WHERE session_id=?", (ts, session_id))
-
-    cur.execute("UPDATE payment_requests SET status='approved', updated_at=? WHERE id=?", (ts, int(req["id"])))
-
-    conn.commit()
-    conn.close()
-    logger.info(f"Approved TXID {txid} for session {session_id}, plan={plan}")
-    return jsonify({"ok": True, "session_id": session_id, "plan": plan})
-
-
-@app.route("/api/admin/set-user", methods=["POST"])
-@csrf.exempt
-def admin_set_user():
-    if not ADMIN_GRANT_KEY:
-        return jsonify({"ok": False, "error": "admin_disabled"}), 403
-
-    if request.headers.get("X-Admin-Key") != ADMIN_GRANT_KEY:
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-
-    data = request.get_json(silent=True) or {}
-    session_id = (data.get("session_id") or "").strip()
-    plan = data.get("plan")
-    credits = data.get("credits")
-
-    if not session_id:
-        return jsonify({"ok": False, "error": "session_id_required"}), 400
-
-    if plan is not None and plan not in ("free", "lifetime"):
-        return jsonify({"ok": False, "error": "invalid_plan"}), 400
-
-    conn = db()
-    cur = conn.cursor()
-    ts = now_iso()
-
-    cur.execute("SELECT * FROM users WHERE session_id=?", (session_id,))
-    u = cur.fetchone()
-    if not u:
-        conn.close()
-        return jsonify({"ok": False, "error": "user_not_found"}), 404
-
-    if plan is not None:
-        cur.execute("UPDATE users SET plan=?, updated_at=? WHERE session_id=?", (plan, ts, session_id))
-
-    if credits is not None:
-        try:
-            credits_int = int(credits)
-        except Exception:
-            conn.close()
-            return jsonify({"ok": False, "error": "credits_must_be_int"}), 400
-        cur.execute("UPDATE users SET credits=?, updated_at=? WHERE session_id=?", (credits_int, ts, session_id))
-
-    conn.commit()
-    cur.execute("SELECT plan, credits, ig_username FROM users WHERE session_id=?", (session_id,))
-    updated = cur.fetchone()
-    conn.close()
-
-    return jsonify({
-        "ok": True,
-        "session_id": session_id,
-        "plan": updated["plan"],
-        "credits": int(updated["credits"]),
-        "ig_username": updated["ig_username"],
-    })
-
-
-# ---------------------------
-# init DB once at startup
-# ---------------------------
+# ---------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------
 init_db()
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
