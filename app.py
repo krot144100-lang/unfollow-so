@@ -34,19 +34,23 @@ STARTER_PACK_CREDITS = int(os.environ.get("STARTER_PACK_CREDITS", 1000))
 ADMIN_GRANT_KEY = os.environ.get("ADMIN_GRANT_KEY")
 PAYMENT_ADDRESS_TRC20 = os.environ.get("PAYMENT_ADDRESS_TRC20", "").strip()
 
+
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
+
 
 def ensure_data_dir():
     d = os.path.dirname(DB_PATH)
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
 
+
 def db():
     ensure_data_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     conn = db()
@@ -90,9 +94,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-@app.before_request
-def _db_bootstrap():
-    init_db()
 
 def get_user_by_session(session_id: str):
     conn = db()
@@ -101,6 +102,7 @@ def get_user_by_session(session_id: str):
     row = cur.fetchone()
     conn.close()
     return row
+
 
 def upsert_user_on_login(session_id: str, ig_user_id: str, ig_username: str):
     conn = db()
@@ -127,6 +129,7 @@ def upsert_user_on_login(session_id: str, ig_user_id: str, ig_username: str):
     conn.commit()
     conn.close()
 
+
 def can_unfollow(user_row):
     if user_row is None:
         return False, "no_user"
@@ -135,6 +138,7 @@ def can_unfollow(user_row):
     if int(user_row["credits"]) <= 0:
         return False, "no_credits"
     return True, None
+
 
 def spend_credit(session_id: str, target_id: str, delta: int):
     conn = db()
@@ -150,6 +154,7 @@ def spend_credit(session_id: str, target_id: str, delta: int):
     """, (session_id, "unfollow", str(target_id), int(delta), now_iso()))
     conn.commit()
     conn.close()
+
 
 # ---------------------------------------------------------
 # 🔧 HELPERS
@@ -169,12 +174,30 @@ def get_instagram_client(session_id):
         logger.error(f"Client creation failed: {e}")
         return None
 
-def validate_sessionid(sessionid):
+
+def validate_sessionid(sessionid: str) -> bool:
     if not sessionid or len(sessionid) < 5:
         return False
     if not re.match(r"^[A-Za-z0-9%._-]+$", sessionid):
         return False
     return True
+
+
+def extract_sessionid(cookie_str: str) -> str:
+    """
+    Accepts either:
+    - pure sessionid value (e.g. 123%3Aabc%3A...)
+    - full cookie header string (e.g. '...; sessionid=...; ...')
+    Returns sessionid value or "".
+    """
+    if not cookie_str:
+        return ""
+    # If it already looks like a pure value and doesn't contain ';', keep as-is.
+    if "sessionid=" not in cookie_str and ";" not in cookie_str:
+        return cookie_str.strip()
+    m = re.search(r"(?:^|;\s*)sessionid=([^;]+)", cookie_str)
+    return m.group(1).strip() if m else ""
+
 
 def validate_txid(txid: str) -> bool:
     if not txid:
@@ -186,6 +209,7 @@ def validate_txid(txid: str) -> bool:
         return False
     return True
 
+
 def require_session(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -194,6 +218,7 @@ def require_session(f):
             return jsonify({"success": False, "error": "Invalid session"}), 401
         return f(*args, **kwargs)
     return decorated_function
+
 
 # ---------------------------------------------------------
 # 🖥️ DARK UI
@@ -428,10 +453,10 @@ async function login(){
       headers: { 'Content-Type':'application/json', 'X-CSRF-Token': csrfToken },
       body: JSON.stringify({ cookies: s })
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
 
     if(!data.success){
-      addLog('Login failed: ' + (data.error || 'unknown'));
+      addLog('Login failed: ' + (data.error || ('HTTP ' + res.status)));
       return;
     }
 
@@ -450,224 +475,6 @@ async function login(){
     btn.textContent = 'LOGIN';
   }
 }
-
-async function scan(){
-  if(!currentSessionId) return alert('Login first');
-
-  const btn = document.getElementById('scanBtn');
-  btn.disabled = true;
-  btn.textContent = 'SCANNING...';
-
-  try{
-    const res = await fetch('/scan', {
-      method: 'POST',
-      headers: {
-        'Content-Type':'application/json',
-        'X-CSRF-Token': csrfToken,
-        'X-Session-ID': currentSessionId
-      },
-      body: JSON.stringify({ smart_mode: true })
-    });
-    const data = await res.json();
-
-    if(!data.success){
-      addLog('Scan failed: ' + (data.error || 'unknown'));
-      return;
-    }
-
-    addLog(`Scan complete. Non-followers: ${data.count}`);
-    document.getElementById('scanInfo').textContent = `Found ${data.count} non-followers (showing up to ${data.non_followers.length}).`;
-    renderList(data.non_followers || []);
-  }catch(e){
-    addLog('Network error during scan');
-  }finally{
-    btn.disabled = false;
-    btn.textContent = 'Scan non-followers';
-    await refreshMe();
-  }
-}
-
-function renderList(users){
-  const root = document.getElementById('results');
-  root.innerHTML = '';
-  if(!users.length){
-    root.innerHTML = `<div class="small" style="margin-top:10px">Everyone follows you back.</div>`;
-    return;
-  }
-
-  users.forEach(u => {
-    const row = document.createElement('div');
-    row.className = 'user-row';
-    row.innerHTML = `
-      <div class="user-meta">
-        <strong>@${u.username}</strong>
-        <div class="sub">${u.follower_count} followers</div>
-      </div>
-      <button class="btn-danger" onclick="unfollow('${u.user_id}', this)">UNFOLLOW</button>
-    `;
-    root.appendChild(row);
-  });
-}
-
-async function unfollow(userId, btn){
-  btn.disabled = true;
-  btn.textContent = '...';
-
-  try{
-    const res = await fetch('/unfollow', {
-      method: 'POST',
-      headers: {
-        'Content-Type':'application/json',
-        'X-CSRF-Token': csrfToken,
-        'X-Session-ID': currentSessionId
-      },
-      body: JSON.stringify({ user_id: userId })
-    });
-
-    if(res.status === 402){
-      addLog('No credits left. Payment required.');
-      btn.textContent = 'LOCKED';
-      openModal();
-      await refreshMe();
-      return;
-    }
-
-    if(res.status === 429){
-      addLog('Rate limited. Try later.');
-      btn.textContent = 'LIMIT';
-      return;
-    }
-
-    const data = await res.json();
-    if(!data.success){
-      addLog('Unfollow failed: ' + (data.error || 'unknown'));
-      btn.disabled = false;
-      btn.textContent = 'RETRY';
-      return;
-    }
-
-    addLog('Unfollowed. Credits updated.');
-    btn.textContent = 'DONE';
-    btn.closest('.user-row').style.opacity = '0.55';
-
-    await refreshMe();
-  }catch(e){
-    addLog('Network error during unfollow');
-    btn.disabled = false;
-    btn.textContent = 'RETRY';
-  }
-}
-
-function logoutLocal(){
-  currentSessionId = '';
-  document.getElementById('sessionid').value = '';
-  document.getElementById('appBox').classList.add('hidden');
-  document.getElementById('loginBox').classList.remove('hidden');
-  setPill('authState', 'Not signed in');
-  setPill('quotaState', 'Plan: — • Credits: —');
-  document.getElementById('results').innerHTML = '';
-  document.getElementById('scanInfo').textContent = '';
-  addLog('Signed out (local).');
-}
-
-/* Modal */
-function openModal(){
-  modal.classList.add("active");
-  document.getElementById("payStatus").textContent = "";
-  document.getElementById("myReq").textContent = "";
-  loadMyRequests();
-}
-function closeModal(){ modal.classList.remove("active"); }
-modal.addEventListener("click", (e) => { if(e.target === modal) closeModal(); });
-
-function copyAddress(){
-  if(!addr){
-    alert("Payment address not configured on server.");
-    return;
-  }
-  navigator.clipboard.writeText(addr).then(() => {
-    document.getElementById("payStatus").textContent = "Address copied.";
-    setTimeout(() => document.getElementById("payStatus").textContent = "", 1200);
-  }).catch(() => prompt("Copy address:", addr));
-}
-
-function selectPlan(p){
-  selectedPlan = p;
-  const hint = document.getElementById("planHint");
-  if (p === "starter") hint.innerHTML = "Selected: STARTER — expected amount: <b>5 USDT</b> (TRC20)";
-  else hint.innerHTML = "Selected: LIFETIME — expected amount: <b>9 USDT</b> (TRC20)";
-}
-
-function openTronScan(){
-  const txid = document.getElementById("txid").value.trim();
-  if(txid){
-    window.open("https://tronscan.org/#/transaction/" + txid, "_blank");
-  } else {
-    window.open("https://tronscan.org/", "_blank");
-  }
-}
-
-async function submitTxid(){
-  if(!currentSessionId){ alert("Login first"); return; }
-  if(!addr){
-    document.getElementById("payStatus").textContent = "Server missing PAYMENT_ADDRESS_TRC20 env.";
-    return;
-  }
-  const txid = document.getElementById("txid").value.trim();
-  if(!txid){
-    document.getElementById("payStatus").textContent = "Paste TXID first.";
-    return;
-  }
-
-  document.getElementById("payStatus").textContent = "Submitting…";
-
-  try{
-    const res = await fetch("/api/payment/submit-txid", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-CSRF-Token": csrfToken,
-        "X-Session-ID": currentSessionId
-      },
-      body: JSON.stringify({ plan: selectedPlan, txid })
-    });
-    const j = await res.json();
-    if(!j.ok){
-      document.getElementById("payStatus").textContent = "Error: " + (j.error || res.status);
-      return;
-    }
-    document.getElementById("payStatus").textContent = "Submitted. Status: pending (manual review).";
-    document.getElementById("txid").value = "";
-    await loadMyRequests();
-  }catch(e){
-    document.getElementById("payStatus").textContent = "Network error";
-  }
-}
-
-async function loadMyRequests(){
-  if(!currentSessionId) return;
-  try{
-    const res = await fetch("/api/payment/my-requests", { headers: { "X-Session-ID": currentSessionId }});
-    const j = await res.json();
-    if(!j.ok){
-      document.getElementById("myReq").textContent = "";
-      return;
-    }
-    const items = j.items || [];
-    if(!items.length){
-      document.getElementById("myReq").textContent = "No payment requests yet.";
-      return;
-    }
-    const top = items[0];
-    document.getElementById("myReq").textContent = `Latest: ${top.plan.toUpperCase()} • ${top.status} • TXID: ${top.txid.slice(0,10)}…`;
-    if(top.status === "approved"){
-      await refreshMe();
-    }
-  }catch(e){}
-}
-
-// default hint
-selectPlan("starter");
 </script>
 </body>
 </html>
@@ -684,48 +491,47 @@ def index():
         pay_addr=PAYMENT_ADDRESS_TRC20
     )
 
+
 @app.route("/login", methods=["POST"])
 @csrf.exempt
 def login():
+    data = request.get_json(silent=True) or {}
+    raw = (data.get("cookies") or "").strip()
+    sessionid = extract_sessionid(raw)
+
+    if not validate_sessionid(sessionid):
+        return jsonify({"success": False, "error": "Invalid sessionid format (paste only sessionid or full Cookie string)"}), 400
+
+    cl = Client()
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"success": False, "error": "No data"}), 400
+        cl.login_by_sessionid(sessionid)
+        user_info = cl.account_info()
 
-        sessionid = data.get("cookies", "").strip()
-        if not validate_sessionid(sessionid):
-            return jsonify({"success": False, "error": "Invalid sessionid format"}), 400
+        device_settings = cl.get_settings()
+        session_id = os.urandom(16).hex()
 
-        cl = Client()
-        try:
-            cl.login_by_sessionid(sessionid)
-            user_info = cl.account_info()
+        user_sessions[session_id] = {
+            "sessionid": sessionid,
+            "device_settings": device_settings,
+            "user_id": user_info.pk,
+            "username": user_info.username,
+            "non_followers": []
+        }
 
-            device_settings = cl.get_settings()
-            session_id = os.urandom(16).hex()
+        upsert_user_on_login(session_id, user_info.pk, user_info.username)
 
-            user_sessions[session_id] = {
-                "sessionid": sessionid,
-                "device_settings": device_settings,
-                "user_id": user_info.pk,
-                "username": user_info.username,
-                "non_followers": []
-            }
+        logger.info(f"Login OK: @{user_info.username}")
+        return jsonify({"success": True, "session_id": session_id, "username": user_info.username})
 
-            upsert_user_on_login(session_id, user_info.pk, user_info.username)
-
-            logger.info(f"Login: @{user_info.username}")
-            return jsonify({"success": True, "session_id": session_id, "username": user_info.username})
-
-        except LoginRequired:
-            return jsonify({"success": False, "error": "Session expired. Get a fresh cookie."}), 401
-        except Exception as e:
-            logger.error(f"Login failed: {e}")
-            return jsonify({"success": False, "error": "Login failed. Check server logs."}), 500
-
+    except LoginRequired:
+        return jsonify({"success": False, "error": "Session expired. Get a fresh cookie."}), 401
+    except ClientError as e:
+        logger.exception("Instagram ClientError during login")
+        return jsonify({"success": False, "error": f"ClientError: {e}"}), 400
     except Exception as e:
-        logger.error(f"System error: {e}")
-        return jsonify({"success": False, "error": "Server error"}), 500
+        logger.exception("Unexpected error during login")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route("/api/me", methods=["GET"])
 @require_session
@@ -741,12 +547,13 @@ def api_me():
         "ig_username": u["ig_username"]
     })
 
+
 @app.route("/api/payment/submit-txid", methods=["POST"])
 @require_session
 @csrf.exempt
 def submit_txid():
     session_id = request.headers.get("X-Session-ID")
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     plan = (data.get("plan") or "").strip()
     txid = (data.get("txid") or "").strip()
 
@@ -775,6 +582,7 @@ def submit_txid():
     logger.info(f"Payment request submitted: plan={plan}, txid={txid}, session={session_id}")
     return jsonify({"ok": True, "status": "pending"})
 
+
 @app.route("/api/payment/my-requests", methods=["GET"])
 @require_session
 def my_payment_requests():
@@ -792,108 +600,111 @@ def my_payment_requests():
     conn.close()
     return jsonify({"ok": True, "items": rows})
 
+
 @app.route("/scan", methods=["POST"])
 @require_session
 @csrf.exempt
 def scan():
+    session_id = request.headers.get("X-Session-ID")
+    data = request.get_json(silent=True) or {}
+    smart_mode = data.get("smart_mode", True)
+
+    cl = get_instagram_client(session_id)
+    if not cl:
+        return jsonify({"success": False, "error": "Session expired"}), 401
+
+    session_data = user_sessions[session_id]
+    user_id = session_data["user_id"]
+
     try:
-        session_id = request.headers.get("X-Session-ID")
-        data = request.get_json() or {}
-        smart_mode = data.get("smart_mode", True)
+        followers = cl.user_followers_v1(user_id, amount=2000)
+        following = cl.user_following_v1(user_id, amount=2000)
 
-        cl = get_instagram_client(session_id)
-        if not cl:
-            return jsonify({"success": False, "error": "Session expired"}), 401
+        followers_iter = followers.values() if isinstance(followers, dict) else followers
+        following_iter = following.values() if isinstance(following, dict) else following
 
-        session_data = user_sessions[session_id]
-        user_id = session_data["user_id"]
-
-        try:
-            followers = cl.user_followers_v1(user_id, amount=2000)
-            following = cl.user_following_v1(user_id, amount=2000)
-
-            followers_iter = followers.values() if isinstance(followers, dict) else followers
-            following_iter = following.values() if isinstance(following, dict) else following
-
-            followers_set = {str(u.pk) for u in followers_iter}
-            following_list = list(following_iter)
-        except Exception as e:
-            return jsonify({"success": False, "error": f"Instagram API Error: {str(e)}"}), 500
-
-        non_followers = []
-        for user in following_list:
-            if str(user.pk) not in followers_set:
-                if smart_mode:
-                    if getattr(user, "is_verified", False):
-                        continue
-                    if getattr(user, "follower_count", 0) > 50000:
-                        continue
-
-                non_followers.append({
-                    "user_id": str(user.pk),
-                    "username": user.username,
-                    "follower_count": getattr(user, "follower_count", 0)
-                })
-
-        session_data["non_followers"] = non_followers
-
-        return jsonify({
-            "success": True,
-            "non_followers": non_followers[:100],
-            "count": len(non_followers)
-        })
-
+        followers_set = {str(u.pk) for u in followers_iter}
+        following_list = list(following_iter)
     except Exception as e:
-        logger.error(f"Scan error: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.exception("Instagram API error during scan")
+        return jsonify({"success": False, "error": f"Instagram API Error: {str(e)}"}), 500
+
+    non_followers = []
+    for user in following_list:
+        if str(user.pk) not in followers_set:
+            if smart_mode:
+                if getattr(user, "is_verified", False):
+                    continue
+                if getattr(user, "follower_count", 0) > 50000:
+                    continue
+
+            non_followers.append({
+                "user_id": str(user.pk),
+                "username": user.username,
+                "follower_count": getattr(user, "follower_count", 0)
+            })
+
+    session_data["non_followers"] = non_followers
+
+    return jsonify({
+        "success": True,
+        "non_followers": non_followers[:100],
+        "count": len(non_followers)
+    })
+
 
 @app.route("/unfollow", methods=["POST"])
 @require_session
 @csrf.exempt
 def unfollow():
+    session_id = request.headers.get("X-Session-ID")
+    data = request.get_json(silent=True) or {}
+
+    raw_user_id = data.get("user_id")
     try:
-        session_id = request.headers.get("X-Session-ID")
-        data = request.get_json() or {}
-        user_id = int(data.get("user_id", 0))
+        user_id = int(raw_user_id)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "invalid_user_id"}), 400
 
-        u = get_user_by_session(session_id)
-        allowed, reason = can_unfollow(u)
-        if not allowed:
-            return jsonify({
-                "success": False,
-                "error": "Payment required",
-                "code": reason,
-                "plan": (u["plan"] if u else None),
-                "credits": (int(u["credits"]) if u else 0)
-            }), 402
+    u = get_user_by_session(session_id)
+    allowed, reason = can_unfollow(u)
+    if not allowed:
+        return jsonify({
+            "success": False,
+            "error": "Payment required",
+            "code": reason,
+            "plan": (u["plan"] if u else None),
+            "credits": (int(u["credits"]) if u else 0)
+        }), 402
 
-        cl = get_instagram_client(session_id)
-        if not cl:
-            return jsonify({"success": False, "error": "Session expired"}), 401
+    cl = get_instagram_client(session_id)
+    if not cl:
+        return jsonify({"success": False, "error": "Session expired"}), 401
 
-        try:
-            cl.user_unfollow(user_id)
+    try:
+        cl.user_unfollow(user_id)
 
-            if u and u["plan"] != "lifetime":
-                spend_credit(session_id, target_id=str(user_id), delta=-1)
+        if u and u["plan"] != "lifetime":
+            spend_credit(session_id, target_id=str(user_id), delta=-1)
 
-            session_data = user_sessions[session_id]
-            session_data["non_followers"] = [
-                x for x in session_data.get("non_followers", [])
-                if str(x.get("user_id")) != str(user_id)
-            ]
+        session_data = user_sessions[session_id]
+        session_data["non_followers"] = [
+            x for x in session_data.get("non_followers", [])
+            if str(x.get("user_id")) != str(user_id)
+        ]
 
-            updated = get_user_by_session(session_id)
-            return jsonify({"success": True, "plan": updated["plan"], "credits": int(updated["credits"])})
+        updated = get_user_by_session(session_id)
+        return jsonify({"success": True, "plan": updated["plan"], "credits": int(updated["credits"])})
 
-        except ClientError as e:
-            if getattr(e, "status_code", None) == 429:
-                return jsonify({"success": False, "error": "Rate limit hit"}), 429
-            return jsonify({"success": False, "error": "API Error"}), 500
-
+    except ClientError as e:
+        if getattr(e, "status_code", None) == 429:
+            return jsonify({"success": False, "error": "Rate limit hit"}), 429
+        logger.exception("ClientError during unfollow")
+        return jsonify({"success": False, "error": f"API Error: {e}"}), 500
     except Exception as e:
-        logger.error(f"Unfollow error: {e}")
+        logger.exception("Unexpected error during unfollow")
         return jsonify({"success": False, "error": str(e)}), 500
+
 
 # Admin: approve request by TXID after manual verification on tronscan
 @app.route("/api/admin/approve-txid", methods=["POST"])
@@ -904,7 +715,7 @@ def admin_approve_txid():
     if request.headers.get("X-Admin-Key") != ADMIN_GRANT_KEY:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     txid = (data.get("txid") or "").strip()
 
     if not validate_txid(txid):
@@ -944,26 +755,19 @@ def admin_approve_txid():
     return jsonify({"ok": True, "session_id": session_id, "plan": plan})
 
 
-# Admin test endpoint: set credits/plan by session_id
 @app.route("/api/admin/set-user", methods=["POST"])
 @csrf.exempt
 def admin_set_user():
-    """
-    Admin test endpoint:
-    - set credits
-    - set plan (free/lifetime)
-    Identify user by session_id (the internal session returned by /login).
-    """
     if not ADMIN_GRANT_KEY:
         return jsonify({"ok": False, "error": "admin_disabled"}), 403
 
     if request.headers.get("X-Admin-Key") != ADMIN_GRANT_KEY:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     session_id = (data.get("session_id") or "").strip()
-    plan = data.get("plan")           # 'free' or 'lifetime' or None
-    credits = data.get("credits")     # int or None
+    plan = data.get("plan")
+    credits = data.get("credits")
 
     if not session_id:
         return jsonify({"ok": False, "error": "session_id_required"}), 400
@@ -990,7 +794,6 @@ def admin_set_user():
         except Exception:
             conn.close()
             return jsonify({"ok": False, "error": "credits_must_be_int"}), 400
-
         cur.execute("UPDATE users SET credits=?, updated_at=? WHERE session_id=?", (credits_int, ts, session_id))
 
     conn.commit()
@@ -1005,6 +808,12 @@ def admin_set_user():
         "credits": int(updated["credits"]),
         "ig_username": updated["ig_username"],
     })
+
+
+# ---------------------------
+# init DB once at startup
+# ---------------------------
+init_db()
 
 
 if __name__ == "__main__":
