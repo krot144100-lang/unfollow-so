@@ -1388,12 +1388,10 @@ def admin_set_user():
 # ---------------------------------------------------------
 # 🚀 RUN
 # ---------------------------------------------------------
+# ✅ ВСТАВЬТЕ ЭТО:
+# Gunicorn будет автоматически запускать app
 if __name__ == "__main__":
+    # Только для локального запуска (python app.py)
     port = int(os.environ.get("PORT", 5000))
-    debug = os.environ.get("FLASK_DEBUG", "False").lower() == "true"
-    
-    logger.info(f"Starting server on port {port}")
-    logger.info(f"Debug mode: {debug}")
-    logger.info(f"Database: {DB_PATH}")
-    
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    logger.info(f"Starting development server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
