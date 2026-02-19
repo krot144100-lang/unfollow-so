@@ -685,6 +685,7 @@ def index():
     )
 
 @app.route("/login", methods=["POST"])
+@csrf.exempt
 def login():
     try:
         data = request.get_json()
@@ -742,6 +743,7 @@ def api_me():
 
 @app.route("/api/payment/submit-txid", methods=["POST"])
 @require_session
+@csrf.exempt
 def submit_txid():
     session_id = request.headers.get("X-Session-ID")
     data = request.get_json() or {}
@@ -792,6 +794,7 @@ def my_payment_requests():
 
 @app.route("/scan", methods=["POST"])
 @require_session
+@csrf.exempt
 def scan():
     try:
         session_id = request.headers.get("X-Session-ID")
@@ -846,6 +849,7 @@ def scan():
 
 @app.route("/unfollow", methods=["POST"])
 @require_session
+@csrf.exempt
 def unfollow():
     try:
         session_id = request.headers.get("X-Session-ID")
@@ -893,6 +897,7 @@ def unfollow():
 
 # Admin: approve request by TXID after manual verification on tronscan
 @app.route("/api/admin/approve-txid", methods=["POST"])
+@csrf.exempt
 def admin_approve_txid():
     if not ADMIN_GRANT_KEY:
         return jsonify({"ok": False, "error": "admin_disabled"}), 403
@@ -937,6 +942,70 @@ def admin_approve_txid():
     conn.close()
     logger.info(f"Approved TXID {txid} for session {session_id}, plan={plan}")
     return jsonify({"ok": True, "session_id": session_id, "plan": plan})
+
+
+# Admin test endpoint: set credits/plan by session_id
+@app.route("/api/admin/set-user", methods=["POST"])
+@csrf.exempt
+def admin_set_user():
+    """
+    Admin test endpoint:
+    - set credits
+    - set plan (free/lifetime)
+    Identify user by session_id (the internal session returned by /login).
+    """
+    if not ADMIN_GRANT_KEY:
+        return jsonify({"ok": False, "error": "admin_disabled"}), 403
+
+    if request.headers.get("X-Admin-Key") != ADMIN_GRANT_KEY:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+
+    data = request.get_json() or {}
+    session_id = (data.get("session_id") or "").strip()
+    plan = data.get("plan")           # 'free' or 'lifetime' or None
+    credits = data.get("credits")     # int or None
+
+    if not session_id:
+        return jsonify({"ok": False, "error": "session_id_required"}), 400
+
+    if plan is not None and plan not in ("free", "lifetime"):
+        return jsonify({"ok": False, "error": "invalid_plan"}), 400
+
+    conn = db()
+    cur = conn.cursor()
+    ts = now_iso()
+
+    cur.execute("SELECT * FROM users WHERE session_id=?", (session_id,))
+    u = cur.fetchone()
+    if not u:
+        conn.close()
+        return jsonify({"ok": False, "error": "user_not_found"}), 404
+
+    if plan is not None:
+        cur.execute("UPDATE users SET plan=?, updated_at=? WHERE session_id=?", (plan, ts, session_id))
+
+    if credits is not None:
+        try:
+            credits_int = int(credits)
+        except Exception:
+            conn.close()
+            return jsonify({"ok": False, "error": "credits_must_be_int"}), 400
+
+        cur.execute("UPDATE users SET credits=?, updated_at=? WHERE session_id=?", (credits_int, ts, session_id))
+
+    conn.commit()
+    cur.execute("SELECT plan, credits, ig_username FROM users WHERE session_id=?", (session_id,))
+    updated = cur.fetchone()
+    conn.close()
+
+    return jsonify({
+        "ok": True,
+        "session_id": session_id,
+        "plan": updated["plan"],
+        "credits": int(updated["credits"]),
+        "ig_username": updated["ig_username"],
+    })
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
