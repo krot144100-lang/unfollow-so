@@ -309,6 +309,7 @@ def spend_credit(session_id: str, target_id: str, delta: int) -> bool:
 # ---------------------------------------------------------
 @contextmanager
 def get_instagram_client(session_id: str):
+    """Context manager for Instagram client"""
     session_data = load_session_data(session_id)
     if not session_data:
         raise ValueError("Session data not found")
@@ -316,12 +317,21 @@ def get_instagram_client(session_id: str):
     cl = None
     try:
         cl = Client()
+        
+        # ✅ Правильная установка sessionid
+        cl.private.sessionid = session_data["sessionid"]
+        cl.user_id = int(session_data["user_id"])
+        
         if "device_settings" in session_data:
-            cl.set_settings(session_data["device_settings"])
-        cl.login_by_sessionid(session_data["sessionid"])
-        cl.account_info()
+            try:
+                cl.set_settings(session_data["device_settings"])
+            except:
+                pass
+        
+        cl.delay_range = [1, 3]
         
         yield cl
+        
     except LoginRequired:
         logger.error(f"Instagram session expired for {mask_sensitive(session_id)}")
         raise
@@ -439,7 +449,13 @@ hr{border:0;border-top:1px solid #1f1f1f;margin:16px 0}
     <textarea id="sessionid" placeholder="Paste Instagram sessionid cookie here..."></textarea>
     <button onclick="login()" id="loginBtn" class="action-btn">LOGIN</button>
     <div class="small">
-      We never ask for passwords. You get <b>100</b> free unfollows per account. Then upgrade.
+      <b style="color:#ff0080">⚠️ How to get sessionid:</b><br>
+      1. Open Instagram in browser and login<br>
+      2. Press F12 → Application → Cookies → instagram.com<br>
+      3. Find <b>sessionid</b> → Copy the VALUE<br>
+      4. Paste here (should be 50-100 chars long)<br>
+      <br>
+      We never ask for passwords. You get <b>100</b> free unfollows per account.
     </div>
     <hr>
   </div>
@@ -852,6 +868,7 @@ def index():
 @csrf.exempt
 @limiter.limit("10 per hour")
 def login():
+    """User login via Instagram sessionid"""
     try:
         data = request.get_json()
         if not data:
@@ -863,38 +880,93 @@ def login():
             logger.error("Login: Invalid sessionid format")
             return jsonify({"success": False, "error": "Invalid sessionid format"}), 400
 
-        logger.info("Login attempt started")
+        logger.info(f"Login attempt - sessionid length: {len(sessionid)}")
         
+        # Создаём клиент
         cl = Client()
+        
+        # Настройки для стабильности
+        cl.delay_range = [1, 3]
+        
         try:
-            cl.login_by_sessionid(sessionid)
-            user_info = cl.account_info()
+            # ✅ ПРАВИЛЬНЫЙ способ установки sessionid
+            logger.info("Attempting login with sessionid...")
+            
+            # Используем внутренний метод для установки sessionid
+            cl.private.sessionid = sessionid
+            
+            # Извлекаем user_id из sessionid
+            if "%3A" in sessionid:
+                user_id = int(sessionid.split("%3A")[0])
+            elif ":" in sessionid:
+                user_id = int(sessionid.split(":")[0])
+            else:
+                raise ValueError("Invalid sessionid format")
+            
+            cl.user_id = user_id
+            logger.info(f"Set user_id: {user_id}")
+            
+            # Проверяем что sessionid работает
+            try:
+                user_info = cl.account_info()
+                logger.info(f"✅ Got account info for @{user_info.username}")
+                
+            except Exception as e:
+                logger.error(f"account_info failed: {e}, trying user_info...")
+                # Fallback
+                user_info = cl.user_info(user_id)
+                logger.info(f"✅ Got user info for @{user_info.username}")
 
-            device_settings = cl.get_settings()
+            username = user_info.username
+            
+            # Получаем настройки устройства
+            try:
+                device_settings = cl.get_settings()
+            except:
+                device_settings = {}
+            
+            # Генерируем internal session ID
             session_id = os.urandom(16).hex()
 
+            # Сохраняем данные сессии
             session_data = {
                 "sessionid": sessionid,
                 "device_settings": device_settings,
-                "user_id": user_info.pk,
-                "username": user_info.username
+                "user_id": user_id,
+                "username": username
             }
 
-            upsert_user_on_login(session_id, user_info.pk, user_info.username, session_data)
+            # Сохраняем в БД
+            upsert_user_on_login(session_id, user_id, username, session_data)
 
-            logger.info(f"Login successful: @{user_info.username}")
+            logger.info(f"✅ Login successful: @{username}")
+            
             return jsonify({
                 "success": True,
                 "session_id": session_id,
-                "username": user_info.username
+                "username": username
             })
 
+        except ValueError as e:
+            logger.error(f"Invalid sessionid format: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Invalid sessionid format. Please copy the complete value."
+            }), 400
+            
         except LoginRequired as e:
-            logger.error(f"Login failed: Session expired - {e}")
-            return jsonify({"success": False, "error": "Session expired. Get a fresh cookie."}), 401
+            logger.error(f"Session expired: {e}")
+            return jsonify({
+                "success": False,
+                "error": "Instagram sessionid expired. Please login again and get fresh sessionid."
+            }), 401
+            
         except Exception as e:
-            logger.error(f"Login failed: {e}", exc_info=True)
-            return jsonify({"success": False, "error": f"Login failed: {str(e)}"}), 500
+            logger.error(f"Login failed: {type(e).__name__}: {e}", exc_info=True)
+            return jsonify({
+                "success": False,
+                "error": f"Instagram rejected sessionid. Try getting a fresh one. Error: {str(e)[:100]}"
+            }), 401
 
     except Exception as e:
         logger.error(f"System error in login: {e}", exc_info=True)
